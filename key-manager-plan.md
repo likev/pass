@@ -183,8 +183,10 @@ sequenceDiagram
        - The admin can unseal the server either by running `./keymanager unseal` (which communicates over a root-only local Unix socket `/run/keymanager/admin.sock`) or via the rate-limited admin unseal endpoint (`POST /api/v1/admin/unseal`).
        - Once the passphrase is verified and `SMK` is decrypted into `mlock` RAM, the server transitions to **Unsealed Mode** and operates normally.
 
-3. **Admin Passphrase Rotation (Re-Wrapping Without Re-Encrypting SQLite)**:
-   - Because `SMK` is wrapped by `AUK`, an admin can rotate the Admin Startup Passphrase at any time (`./keymanager rotate-passphrase`) by decrypting `server_master.key.enc` with the old passphrase and re-encrypting the **same** `SMK` with a new `kdf_salt`, `seal_iv`, and new passphrase—without needing to touch any row in SQLite.
+3. **Admin Passphrase Rotation (Strictly a CLI Operation Requiring Current Passphrase)**:
+   - Passphrase rotation is strictly a local CLI operation (`./keymanager rotate-passphrase`) and is intentionally **never exposed over HTTP/web**.
+   - Executing rotation strictly requires the **current (old) Admin Startup Passphrase** to authenticate and decrypt `server_master.key.enc`. If the old passphrase is missing or incorrect, rotation fails immediately (`ErrAuthentication`) and the file remains untouched.
+   - Upon successful verification, the existing `SMK` is re-encrypted with a fresh Argon2id salt and AES-GCM IV under the new passphrase without modifying any row in SQLite.
 
 ---
 

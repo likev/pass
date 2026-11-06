@@ -161,6 +161,14 @@ func TestServerSealedGuardAndUnseal(t *testing.T) {
 	if err := sealMgr.Unseal("valid-passphrase-1234"); err != nil {
 		t.Fatalf("original passphrase should still work, but got: %v", err)
 	}
+
+	// 8. Verify Passphrase rotation is strictly a CLI operation and NOT accessible over HTTP
+	rotateReq := httptest.NewRequest("POST", "/api/v1/admin/rotate-passphrase", bytes.NewBufferString(`{"old_passphrase":"valid-passphrase-1234","new_passphrase":"new-passphrase-1234"}`))
+	rotateW := httptest.NewRecorder()
+	handler.ServeHTTP(rotateW, rotateReq)
+	if rotateW.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found for rotate-passphrase over HTTP, got %d", rotateW.Code)
+	}
 }
 
 func TestKeysAndBackupAPI(t *testing.T) {

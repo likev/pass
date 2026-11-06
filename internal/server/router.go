@@ -64,9 +64,9 @@ func (s *Server) SetupHandler() http.Handler {
 	}
 
 	// 1. Admin seal endpoints (Rate limit: 3/min/IP for unseal, 30/min/IP for status)
+	// Note: Passphrase rotation is strictly a CLI operation (keymanager rotate-passphrase) and is not exposed over HTTP.
 	mux.HandleFunc("GET /api/v1/admin/seal-status", s.handleSealStatus)
 	mux.HandleFunc("POST /api/v1/admin/unseal", s.limiter.Limit(3, time.Minute, middleware.GetIP)(http.HandlerFunc(s.handleUnseal)).ServeHTTP)
-	mux.HandleFunc("POST /api/v1/admin/rotate-passphrase", s.limiter.Limit(3, time.Minute, middleware.GetIP)(http.HandlerFunc(s.handleRotatePassphrase)).ServeHTTP)
 
 	// 2. Auth endpoints
 	mux.HandleFunc("POST /api/v1/auth/register/begin", s.limiter.Limit(5, time.Minute, middleware.GetIP)(http.HandlerFunc(s.handleRegisterBegin)).ServeHTTP)
@@ -175,24 +175,6 @@ func (s *Server) handleUnseal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"status": "unsealed"})
-}
-
-func (s *Server) handleRotatePassphrase(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		OldPassphrase string `json:"old_passphrase"`
-		NewPassphrase string `json:"new_passphrase"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request body")
-		return
-	}
-
-	if err := s.sealMgr.RotatePassphrase(body.OldPassphrase, body.NewPassphrase); err != nil {
-		writeError(w, http.StatusBadRequest, "rotate_failed", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"status": "passphrase_rotated"})
 }
 
 // ---------------- Auth Handlers ----------------

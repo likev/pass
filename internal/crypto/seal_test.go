@@ -92,10 +92,22 @@ func TestSealManager(t *testing.T) {
 		t.Fatalf("expected ErrAlreadyUnsealed, got %v", err)
 	}
 
-	// 8. Rotate Passphrase
+	// 8. Rotate Passphrase requires authentic old passphrase
 	pass2 := "a-brand-new-secure-passphrase-5678"
+
+	// 8a. Wrong old passphrase fails with ErrAuthentication
+	if err := smRestart.RotatePassphrase("wrong-old-passphrase-1234", pass2); err != ErrAuthentication {
+		t.Fatalf("expected ErrAuthentication when rotating with wrong old passphrase, got %v", err)
+	}
+
+	// 8b. Short new passphrase fails with ErrInvalidPassphrase
+	if err := smRestart.RotatePassphrase(pass1, "short"); err != ErrInvalidPassphrase {
+		t.Fatalf("expected ErrInvalidPassphrase when new passphrase is short, got %v", err)
+	}
+
+	// 8c. Authentic old passphrase succeeds
 	if err := smRestart.RotatePassphrase(pass1, pass2); err != nil {
-		t.Fatalf("RotatePassphrase failed: %v", err)
+		t.Fatalf("RotatePassphrase failed with authentic old passphrase: %v", err)
 	}
 
 	// 9. Verify unseal with new passphrase after restart
