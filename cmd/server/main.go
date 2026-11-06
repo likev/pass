@@ -57,9 +57,14 @@ func main() {
 		log.Printf("[Main] No sealed key file at %s. Server will require initialization.", cfg.SealedSMKPath)
 	}
 
-	// 3. Prompt TTY passphrase if interactive
-	if err := sealMgr.PromptPassphraseIfTTY(); err != nil {
-		log.Printf("[Main] TTY unseal notice: %v", err)
+	// 3. Try auto-unseal from env/file, or prompt TTY passphrase if interactive
+	if err := sealMgr.TryAutoUnseal(); err != nil {
+		log.Printf("[Main] Auto-unseal notice: %v", err)
+	}
+	if !sealMgr.IsUnsealed() {
+		if err := sealMgr.PromptPassphraseIfTTY(); err != nil {
+			log.Printf("[Main] TTY unseal notice: %v", err)
+		}
 	}
 
 	// 4. Initialize Core Services

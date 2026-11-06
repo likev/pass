@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/argon2"
@@ -339,6 +340,45 @@ func (s *SealManager) RotatePassphrase(oldPassphrase, newPassphrase string) erro
 		s.smk = newSMKCopy
 	}
 
+	return nil
+}
+
+// TryAutoUnseal checks environment variables ADMIN_PASSPHRASE or ADMIN_PASSPHRASE_FILE.
+// If provided, it automatically unseals the SMK (or initializes it if not initialized).
+func (s *SealManager) TryAutoUnseal() error {
+	pass := os.Getenv("ADMIN_PASSPHRASE")
+	if pass == "" {
+		if path := os.Getenv("ADMIN_PASSPHRASE_FILE"); path != "" {
+			data, err := os.ReadFile(path)
+			if err == nil {
+				pass = strings.TrimSpace(string(data))
+				clear(data)
+			}
+		}
+	}
+	if pass == "" {
+		return nil
+	}
+
+	defer os.Unsetenv("ADMIN_PASSPHRASE")
+
+	if !s.IsInitialized() {
+		if len(pass) < minPassLen {
+			return ErrInvalidPassphrase
+		}
+		if err := s.InitSMK(pass); err != nil {
+			return fmt.Errorf("auto-init failed: %w", err)
+		}
+		return nil
+	}
+
+	if s.IsUnsealed() {
+		return nil
+	}
+
+	if err := s.Unseal(pass); err != nil {
+		return fmt.Errorf("auto-unseal failed: %w", err)
+	}
 	return nil
 }
 

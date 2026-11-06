@@ -110,4 +110,17 @@ func TestSealManager(t *testing.T) {
 	if err != nil || !bytes.Equal(origSMK, rotatedSMK) {
 		t.Fatalf("SMK changed or error after passphrase rotation: %v", err)
 	}
+
+	// 10. Test TryAutoUnseal via env
+	smAuto := NewSealManager(keyFile)
+	if smAuto.IsUnsealed() {
+		t.Fatalf("expected sealed before auto-unseal")
+	}
+	os.Setenv("ADMIN_PASSPHRASE", pass2)
+	if err := smAuto.TryAutoUnseal(); err != nil {
+		t.Fatalf("TryAutoUnseal failed: %v", err)
+	}
+	if !smAuto.IsUnsealed() {
+		t.Fatalf("expected unsealed after TryAutoUnseal")
+	}
 }

@@ -89,6 +89,81 @@ All settings can be configured via environment variables or flags:
 | `RP_ORIGIN` | *(auto-detected)* | WebAuthn Relying Party Origin (e.g. `https://vault.example.com`) |
 | `TLS_CERT` | *(none)* | Path to TLS certificate (optional) |
 | `TLS_KEY` | *(none)* | Path to TLS private key (optional) |
+| `ADMIN_PASSPHRASE` | *(none)* | Optional: Passphrase to auto-unseal the server on boot (e.g. in `/etc/keymanager/keymanager.env`). If omitted, the server boots in Sealed Mode and can be unsealed via the Web UI. |
+| `ADMIN_PASSPHRASE_FILE` | *(none)* | Optional: Path to a file containing the Admin Startup Passphrase (useful for systemd credentials). |
+
+---
+
+## Running as a System Service (systemd)
+
+The key manager can run as a background `systemd` service that starts automatically on boot.
+
+### Service Installation
+
+1. The service unit is installed at `/etc/systemd/system/keymanager.service`:
+   ```ini
+   [Unit]
+   Description=Passkey Web Password & Key Manager
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=root
+   WorkingDirectory=/root/pass
+   ExecStart=/root/pass/keymanager run
+   Restart=on-failure
+   RestartSec=5s
+   LimitMEMLOCK=infinity
+   EnvironmentFile=-/etc/keymanager/keymanager.env
+   StandardOutput=journal
+   StandardError=journal
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+2. Environment configuration is managed in `/etc/keymanager/keymanager.env`:
+   ```bash
+   PORT=8082
+   HOST=localhost
+   DB_PATH=/root/pass/keymanager.db
+   SEALED_SMK_PATH=/root/pass/server_master.key.enc
+   BACKUP_DIR=/root/pass/backups
+   # Optional: set ADMIN_PASSPHRASE if you want automated unsealing on service boot
+   # ADMIN_PASSPHRASE=your-secure-passphrase-here
+   ```
+
+### Managing the Service
+
+```bash
+# Start the service
+systemctl start keymanager
+
+# Check service status
+systemctl status keymanager
+
+# View live service logs
+journalctl -u keymanager -f
+
+# Enable service to start on boot
+systemctl enable keymanager
+
+# Restart or stop the service
+systemctl restart keymanager
+systemctl stop keymanager
+```
+
+### Unsealing When Running as a Service
+
+When running as a system service, the server starts safely in **Sealed Mode**:
+- **Via Web UI**: Open `http://localhost:8082` (or your reverse proxy URL). The web interface will show the **Unseal Server** screen. Enter your Admin Startup Passphrase to unseal the server into RAM.
+- **Via API / curl**:
+  ```bash
+  curl -X POST http://localhost:8082/api/v1/admin/unseal \
+       -H "Content-Type: application/json" \
+       -d '{"passphrase":"your-admin-passphrase"}'
+  ```
+- **Automated Unseal on Boot**: Uncomment `ADMIN_PASSPHRASE` in `/etc/keymanager/keymanager.env` (`chmod 600 /etc/keymanager/keymanager.env`). The server will automatically unseal into RAM when systemd starts the service.
 
 ---
 
