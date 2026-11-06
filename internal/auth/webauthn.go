@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -36,6 +37,7 @@ var (
 	ErrUserNotFound       = errors.New("user not found")
 	ErrUserAlreadyExists  = errors.New("user already exists")
 	ErrCredentialRevoked  = errors.New("credential has been revoked")
+	ErrInvalidCredential  = errors.New("credential does not belong to user")
 	ErrInvalidRequest     = errors.New("invalid request payload")
 	ErrVerificationFailed = errors.New("webauthn verification failed")
 )
@@ -228,6 +230,9 @@ func (as *AuthService) BeginRegistrationForUser(ctx context.Context, user *WebAu
 	regOpts := []webauthn.RegistrationOption{
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 	}
+	if len(user.WebAuthnCredentials()) > 0 {
+		regOpts = append(regOpts, webauthn.WithExclusions(webauthn.Credentials(user.WebAuthnCredentials()).CredentialDescriptors()))
+	}
 	if rpID != "" {
 		regOpts = append(regOpts, webauthn.WithRegistrationRelyingPartyID(rpID))
 	}
@@ -259,6 +264,15 @@ func (as *AuthService) buildWebAuthnUser(ctx context.Context, dbUser *db.User) (
 
 // BeginRegistration starts the Passkey creation ceremony
 func (as *AuthService) BeginRegistration(ctx context.Context, username, displayName string) (*protocol.CredentialCreation, string, string, error) {
+	username = strings.TrimSpace(username)
+	displayName = strings.TrimSpace(displayName)
+	if username == "" || len(username) > 128 || len(displayName) > 128 {
+		return nil, "", "", ErrInvalidRequest
+	}
+	if displayName == "" {
+		displayName = username
+	}
+
 	// Check if user already exists
 	existingUser, _ := as.db.GetUserByUsername(ctx, username)
 	if existingUser != nil {
@@ -323,11 +337,26 @@ func (as *AuthService) ValidateLogin(ctx context.Context, user *WebAuthnUser, se
 	if customOrigin, ok := ctx.Value(OriginContextKey).(string); ok && customOrigin != "" {
 		as.ensureOriginLocked(customOrigin)
 	}
+	// If login was initiated as discoverable (sessionData.UserID is empty), verify userHandle if present and bind UserID
+	if len(sessionData.UserID) == 0 && user != nil {
+		if len(parsedResponse.Response.UserHandle) > 0 && !bytes.Equal(parsedResponse.Response.UserHandle, user.WebAuthnID()) {
+			return nil, errors.New("user handle does not match credential owner")
+		}
+		sessionData.UserID = user.WebAuthnID()
+	}
 	return as.webAuthn.ValidateLogin(user, sessionData, parsedResponse)
 }
 
 // FinishRegistration completes Passkey creation and stores wrapped_mek
 func (as *AuthService) FinishRegistration(ctx context.Context, regID string, attestationBytes []byte, wrappedMEK, wrappedMEKIV []byte, deviceName string, ipAddr string) (*SessionInfo, *db.User, error) {
+	deviceName = strings.TrimSpace(deviceName)
+	if deviceName == "" {
+		deviceName = "Primary Passkey Device"
+	}
+	if len(deviceName) > 128 || len(wrappedMEK) == 0 || len(wrappedMEKIV) != 12 {
+		return nil, nil, ErrInvalidRequest
+	}
+
 	as.mu.Lock()
 	entry, ok := as.regSessions[regID]
 	if ok {
@@ -355,11 +384,6 @@ func (as *AuthService) FinishRegistration(ctx context.Context, regID string, att
 		return nil, nil, fmt.Errorf("failed to create credential: %w", err)
 	}
 
-	// Persist user and credential in DB
-	if err := as.db.CreateUser(ctx, entry.userID, entry.username, entry.displayName); err != nil {
-		return nil, nil, fmt.Errorf("failed to save user: %w", err)
-	}
-
 	transportsJSON, _ := json.Marshal(cred.Transport)
 	dbCred := &db.Credential{
 		ID:              cred.ID,
@@ -378,11 +402,14 @@ func (as *AuthService) FinishRegistration(ctx context.Context, regID string, att
 		Status:          "verified",
 	}
 
-	if err := as.db.CreateCredential(ctx, dbCred); err != nil {
-		return nil, nil, fmt.Errorf("failed to save credential: %w", err)
+	// Atomically persist user, credential, and audit log in DB
+	auditMsg := fmt.Sprintf("registered device %s", deviceName)
+	if err := as.db.CreateUserWithCredentialTx(ctx, entry.userID, entry.username, entry.displayName, dbCred, ipAddr, auditMsg); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return nil, nil, ErrUserAlreadyExists
+		}
+		return nil, nil, fmt.Errorf("failed to save user and credential: %w", err)
 	}
-
-	_ = as.db.InsertAuditLog(ctx, &entry.userID, "register", ipAddr, fmt.Sprintf("registered device %s", deviceName))
 
 	session, err := as.sessions.CreateSession(entry.userID, cred.ID)
 	if err != nil {
@@ -400,24 +427,25 @@ func (as *AuthService) FinishRegistration(ctx context.Context, regID string, att
 
 // BeginLogin starts Passkey assertion
 func (as *AuthService) BeginLogin(ctx context.Context, username string) (*protocol.CredentialAssertion, string, []string, error) {
-	var user *WebAuthnUser
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, "", nil, errors.New("username is required")
+	}
+
+	dbUser, err := as.db.GetUserByUsername(ctx, username)
+	if err != nil || dbUser == nil {
+		return nil, "", nil, ErrUserNotFound
+	}
+	user, err := as.buildWebAuthnUser(ctx, dbUser)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
 	var prfSalts []string
-
-	if username != "" {
-		dbUser, err := as.db.GetUserByUsername(ctx, username)
-		if err != nil {
-			return nil, "", nil, ErrUserNotFound
-		}
-		user, err = as.buildWebAuthnUser(ctx, dbUser)
-		if err != nil {
-			return nil, "", nil, err
-		}
-
-		creds, _ := as.db.GetCredentialsByUserID(ctx, dbUser.ID)
-		for _, c := range creds {
-			if c.Status == "verified" {
-				prfSalts = append(prfSalts, base64.RawURLEncoding.EncodeToString(c.PRFSalt))
-			}
+	creds, _ := as.db.GetCredentialsByUserID(ctx, dbUser.ID)
+	for _, c := range creds {
+		if c.Status == "verified" {
+			prfSalts = append(prfSalts, base64.RawURLEncoding.EncodeToString(c.PRFSalt))
 		}
 	}
 
@@ -441,26 +469,13 @@ func (as *AuthService) BeginLogin(ctx context.Context, username string) (*protoc
 		loginOpts = append(loginOpts, webauthn.WithLoginOrigin(origin))
 	}
 
-	var options *protocol.CredentialAssertion
-	var sessionData *webauthn.SessionData
-
-	if user != nil {
-		options, sessionData, err = as.webAuthn.BeginLogin(user, loginOpts...)
-	} else {
-		// Discoverable credential login
-		options, sessionData, err = as.webAuthn.BeginDiscoverableLogin(loginOpts...)
-	}
+	options, sessionData, err := as.webAuthn.BeginLogin(user, loginOpts...)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("failed to begin login: %w", err)
 	}
 
-	userID := ""
-	if user != nil {
-		userID = string(user.id)
-	}
-
 	as.loginSessions[loginID] = &loginSessionEntry{
-		userID:      userID,
+		userID:      string(user.id),
 		sessionData: sessionData,
 		expiresAt:   time.Now().Add(5 * time.Minute),
 	}
@@ -494,6 +509,9 @@ func (as *AuthService) FinishLogin(ctx context.Context, loginID string, assertio
 	if dbCred.Status != "verified" {
 		return nil, nil, ErrCredentialRevoked
 	}
+	if entry.userID != "" && dbCred.UserID != entry.userID {
+		return nil, nil, errors.New("credential does not belong to the requested user")
+	}
 
 	dbUser, err := as.db.GetUserByID(ctx, dbCred.UserID)
 	if err != nil || dbUser == nil {
@@ -508,6 +526,10 @@ func (as *AuthService) FinishLogin(ctx context.Context, loginID string, assertio
 	verifiedCred, err := as.ValidateLogin(ctx, waUser, *entry.sessionData, parsedResponse)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to validate assertion: %w", err)
+	}
+	if verifiedCred.Authenticator.CloneWarning {
+		_ = as.db.InsertAuditLog(ctx, &dbUser.ID, "clone_warning", ipAddr, fmt.Sprintf("authenticator clone warning on device %s", dbCred.DeviceName))
+		return nil, nil, errors.New("authenticator clone warning: signature counter anomaly")
 	}
 
 	_ = as.db.UpdateCredentialSignCount(ctx, credID, verifiedCred.Authenticator.SignCount)
@@ -542,6 +564,9 @@ func (as *AuthService) BeginStepUp(ctx context.Context, userID string, credID []
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("failed to get active credential: %w", err)
 	}
+	if cred.UserID != userID {
+		return nil, "", nil, errors.New("credential does not belong to user")
+	}
 	if cred.Status != "verified" {
 		return nil, "", nil, ErrCredentialRevoked
 	}
@@ -551,8 +576,10 @@ func (as *AuthService) BeginStepUp(ctx context.Context, userID string, credID []
 
 	rpID, origin := as.getRPIDAndOriginLocked(ctx)
 
+	waCred := toWebAuthnCredential(cred)
 	stepUpOpts := []webauthn.LoginOption{
 		webauthn.WithUserVerification(protocol.VerificationRequired),
+		webauthn.WithAllowedCredentials([]protocol.CredentialDescriptor{waCred.Descriptor()}),
 	}
 	if rpID != "" {
 		stepUpOpts = append(stepUpOpts, webauthn.WithLoginRelyingPartyID(rpID))
@@ -645,6 +672,10 @@ func (as *AuthService) VerifyStepUp(ctx context.Context, stepUpID string, assert
 	verifiedCred, err := as.ValidateLogin(ctx, waUser, *entry.sessionData, parsedResponse)
 	if err != nil {
 		return nil, fmt.Errorf("step-up assertion verification failed: %w", err)
+	}
+	if verifiedCred.Authenticator.CloneWarning {
+		_ = as.db.InsertAuditLog(ctx, &dbUser.ID, "clone_warning", "", fmt.Sprintf("authenticator clone warning on step-up device %s", dbCred.DeviceName))
+		return nil, errors.New("authenticator clone warning: signature counter anomaly")
 	}
 
 	_ = as.db.UpdateCredentialSignCount(ctx, credID, verifiedCred.Authenticator.SignCount)

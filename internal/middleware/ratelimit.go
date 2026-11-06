@@ -31,10 +31,15 @@ func NewRateLimiter() *RateLimiter {
 	return rl
 }
 
+const maxRateLimiterRecords = 50000
+
 func (rl *RateLimiter) cleanup() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	cutoff := time.Now().Add(-5 * time.Minute)
+	rl.cleanupLocked(time.Now().Add(-5 * time.Minute))
+}
+
+func (rl *RateLimiter) cleanupLocked(cutoff time.Time) {
 	for k, rec := range rl.records {
 		var valid []time.Time
 		for _, t := range rec.timestamps {
@@ -50,36 +55,40 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
-func GetIP(r *http.Request) string {
-	if cfIP := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cfIP != "" {
-		if host, _, err := net.SplitHostPort(cfIP); err == nil {
-			return host
-		}
-		return strings.Trim(cfIP, "[]")
+func parseCandidateIP(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
 	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		if host, _, err := net.SplitHostPort(realIP); err == nil {
-			return host
-		}
-		return strings.Trim(realIP, "[]")
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	raw = strings.Trim(raw, "[]")
+	if parsed := net.ParseIP(raw); parsed != nil {
+		return parsed.String(), true
+	}
+	return "", false
+}
+
+func GetIP(r *http.Request) string {
+	if cfIP, ok := parseCandidateIP(r.Header.Get("CF-Connecting-IP")); ok {
+		return cfIP
+	}
+	if realIP, ok := parseCandidateIP(r.Header.Get("X-Real-IP")); ok {
+		return realIP
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part != "" {
-				if host, _, err := net.SplitHostPort(part); err == nil {
-					return host
-				}
-				return strings.Trim(part, "[]")
+			if ip, ok := parseCandidateIP(part); ok {
+				return ip
 			}
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+	if remoteIP, ok := parseCandidateIP(r.RemoteAddr); ok {
+		return remoteIP
 	}
-	return strings.Trim(strings.TrimSpace(r.RemoteAddr), "[]")
+	return "unknown"
 }
 
 func (rl *RateLimiter) Limit(maxRequests int, window time.Duration, keyFunc func(*http.Request) string) func(http.Handler) http.Handler {
@@ -96,6 +105,19 @@ func (rl *RateLimiter) Limit(maxRequests int, window time.Duration, keyFunc func
 			rl.mu.Lock()
 			rec, exists := rl.records[key]
 			if !exists {
+				if len(rl.records) >= maxRateLimiterRecords {
+					rl.cleanupLocked(cutoff)
+				}
+				if len(rl.records) >= maxRateLimiterRecords {
+					rl.mu.Unlock()
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error":   "rate_limit_exceeded",
+						"message": "Too many requests. Please slow down.",
+					})
+					return
+				}
 				rec = &clientRecord{}
 				rl.records[key] = rec
 			}

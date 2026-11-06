@@ -88,6 +88,46 @@ func (d *DB) CreateUser(ctx context.Context, id, username, displayName string) e
 	return err
 }
 
+func (d *DB) CreateUserWithCredentialTx(ctx context.Context, id, username, displayName string, cred *Credential, auditIP, auditMsg string) error {
+	ctx = ensureCtx(ctx)
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO users (id, username, display_name, created_at, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		id, username, displayName)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO credentials (
+			id, user_id, device_name, public_key, attestation_type, aaguid,
+			sign_count, transports, backup_eligible, backup_state,
+			prf_salt, wrapped_mek, wrapped_mek_iv, status, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		cred.ID, cred.UserID, cred.DeviceName, cred.PublicKey, cred.AttestationType, cred.AAGUID,
+		cred.SignCount, cred.Transports, cred.BackupEligible, cred.BackupState,
+		cred.PRFSalt, cred.WrappedMEK, cred.WrappedMEKIV, cred.Status,
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO audit_logs (user_id, event_type, ip_address, metadata, created_at) VALUES (?, 'register', ?, ?, CURRENT_TIMESTAMP)`,
+		id, auditIP, auditMsg,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 func (d *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	ctx = ensureCtx(ctx)
 	row := d.QueryRowContext(ctx, `SELECT id, username, display_name, created_at, updated_at FROM users WHERE id = ?`, id)
@@ -265,12 +305,18 @@ func (d *DB) GetPendingDeviceRequests(ctx context.Context, userID string) ([]Dev
 func (d *DB) ApproveDeviceRequest(ctx context.Context, id string, approverECDHPub, encryptedMEKTransfer, transferIV, approverCredID []byte) error {
 	ctx = ensureCtx(ctx)
 	now := time.Now().UTC()
-	_, err := d.ExecContext(ctx,
+	res, err := d.ExecContext(ctx,
 		`UPDATE device_verification_requests
 		SET approver_ecdh_pub = ?, encrypted_mek_transfer = ?, transfer_iv = ?, approved_by_credential_id = ?, status = 'approved'
 		WHERE id = ? AND status = 'pending' AND expires_at > ?`,
 		approverECDHPub, encryptedMEKTransfer, transferIV, approverCredID, id, now)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (d *DB) CompleteDeviceRequest(ctx context.Context, id string) error {
@@ -288,7 +334,19 @@ func (d *DB) CompleteDeviceEnrollmentTx(ctx context.Context, cred *Credential, r
 	}
 	defer tx.Rollback()
 
-	// 1. Insert credential
+	// 1. Complete device request (must be pending or approved and not expired)
+	res, err := tx.ExecContext(ctx,
+		`UPDATE device_verification_requests SET status = 'completed' WHERE id = ? AND status IN ('pending', 'approved') AND expires_at > ?`,
+		reqID, time.Now().UTC(),
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+
+	// 2. Insert credential
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO credentials (
 			id, user_id, device_name, public_key, attestation_type, aaguid,
@@ -303,7 +361,7 @@ func (d *DB) CompleteDeviceEnrollmentTx(ctx context.Context, cred *Credential, r
 		return err
 	}
 
-	// 2. If revokeCredID is provided, revoke old credential
+	// 3. If revokeCredID is provided, revoke old credential
 	if len(revokeCredID) > 0 {
 		_, err = tx.ExecContext(ctx,
 			`UPDATE credentials SET status = 'revoked', last_used_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
@@ -312,15 +370,6 @@ func (d *DB) CompleteDeviceEnrollmentTx(ctx context.Context, cred *Credential, r
 		if err != nil {
 			return err
 		}
-	}
-
-	// 3. Complete device request
-	_, err = tx.ExecContext(ctx,
-		`UPDATE device_verification_requests SET status = 'completed' WHERE id = ?`,
-		reqID,
-	)
-	if err != nil {
-		return err
 	}
 
 	// 4. Audit log
@@ -379,15 +428,22 @@ func (d *DB) CountKeysByIP(ctx context.Context, ip string) (int, error) {
 	return count, err
 }
 
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 func (d *DB) ListKeysMetadata(ctx context.Context, userID, query string) ([]KeyMetadata, error) {
 	ctx = ensureCtx(ctx)
 	normQuery := strings.ToLower(strings.TrimSpace(query))
-	likePattern := "%" + normQuery + "%"
+	likePattern := "%" + escapeLikePattern(normQuery) + "%"
 
 	rows, err := d.QueryContext(ctx,
 		`SELECT id, name, created_at, updated_at
 		FROM keys
-		WHERE user_id = ? AND name_normalized LIKE ?
+		WHERE user_id = ? AND name_normalized LIKE ? ESCAPE '\'
 		ORDER BY name_normalized ASC
 		LIMIT 100`, userID, likePattern)
 	if err != nil {
@@ -428,19 +484,31 @@ func (d *DB) GetKeyByID(ctx context.Context, id, userID string) (*Key, error) {
 
 func (d *DB) UpdateKey(ctx context.Context, id, userID, name, nameNorm string, serverCT, serverIV, serverSalt, clientIV, clientSalt []byte) error {
 	ctx = ensureCtx(ctx)
-	_, err := d.ExecContext(ctx,
+	res, err := d.ExecContext(ctx,
 		`UPDATE keys
 		SET name = ?, name_normalized = ?, server_ciphertext = ?,
 			server_iv = ?, server_salt = ?, client_iv = ?, client_salt = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND user_id = ?`,
 		name, nameNorm, serverCT, serverIV, serverSalt, clientIV, clientSalt, id, userID)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (d *DB) DeleteKey(ctx context.Context, id, userID string) error {
 	ctx = ensureCtx(ctx)
-	_, err := d.ExecContext(ctx, `DELETE FROM keys WHERE id = ? AND user_id = ?`, id, userID)
-	return err
+	res, err := d.ExecContext(ctx, `DELETE FROM keys WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (d *DB) InsertAuditLog(ctx context.Context, userID *string, eventType, ipAddress, metadata string) error {

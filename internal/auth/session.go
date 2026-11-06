@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -66,6 +67,22 @@ func generateRandomToken(bytesLen int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+func copySessionInfo(s *SessionInfo) *SessionInfo {
+	if s == nil {
+		return nil
+	}
+	credCopy := make([]byte, len(s.CredentialID))
+	copy(credCopy, s.CredentialID)
+	return &SessionInfo{
+		ID:           s.ID,
+		UserID:       s.UserID,
+		CredentialID: credCopy,
+		CSRFToken:    s.CSRFToken,
+		CreatedAt:    s.CreatedAt,
+		ExpiresAt:    s.ExpiresAt,
+	}
+}
+
 func (sm *SessionManager) CreateSession(userID string, credentialID []byte) (*SessionInfo, error) {
 	sessionID, err := generateRandomToken(32)
 	if err != nil {
@@ -76,10 +93,13 @@ func (sm *SessionManager) CreateSession(userID string, credentialID []byte) (*Se
 		return nil, err
 	}
 
+	credCopy := make([]byte, len(credentialID))
+	copy(credCopy, credentialID)
+
 	info := &SessionInfo{
 		ID:           sessionID,
 		UserID:       userID,
-		CredentialID: credentialID,
+		CredentialID: credCopy,
 		CSRFToken:    csrfToken,
 		CreatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(SessionDuration),
@@ -89,7 +109,7 @@ func (sm *SessionManager) CreateSession(userID string, credentialID []byte) (*Se
 	sm.sessions[sessionID] = info
 	sm.mu.Unlock()
 
-	return info, nil
+	return copySessionInfo(info), nil
 }
 
 func (sm *SessionManager) GetSession(sessionID string) (*SessionInfo, error) {
@@ -100,13 +120,39 @@ func (sm *SessionManager) GetSession(sessionID string) (*SessionInfo, error) {
 	if !ok || time.Now().After(s.ExpiresAt) {
 		return nil, ErrSessionNotFound
 	}
-	return s, nil
+	return copySessionInfo(s), nil
 }
 
 func (sm *SessionManager) InvalidateSession(sessionID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	delete(sm.sessions, sessionID)
+}
+
+func (sm *SessionManager) InvalidateSessionsByCredentialID(credID []byte) {
+	if len(credID) == 0 {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for id, s := range sm.sessions {
+		if bytes.Equal(s.CredentialID, credID) {
+			delete(sm.sessions, id)
+		}
+	}
+}
+
+func (sm *SessionManager) InvalidateSessionsByUserID(userID string) {
+	if userID == "" {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for id, s := range sm.sessions {
+		if s.UserID == userID {
+			delete(sm.sessions, id)
+		}
+	}
 }
 
 func (sm *SessionManager) SetCookie(w http.ResponseWriter, sessionID string, secure bool) {

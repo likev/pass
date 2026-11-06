@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"passmanager/internal/middleware"
 	"passmanager/web"
 )
+
+const maxRequestBodyBytes = 256 * 1024 // 256 KB max request body
 
 type Server struct {
 	cfg       *config.Config
@@ -101,8 +104,17 @@ func (s *Server) SetupHandler() http.Handler {
 	// 6. Backup Trigger
 	mux.Handle("POST /api/v1/admin/backup", authMiddleware(http.HandlerFunc(s.handleRunBackup)))
 
-	// Chain middlewares: ProxyHeaders -> SecurityHeaders -> SealGuard -> mux
-	handler := middleware.ProxyHeaders(s.cfg.RPID)(middleware.SecurityHeaders(middleware.SealGuard(s.sealMgr)(mux)))
+	bodyLimitMiddleware := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	// Chain middlewares: ProxyHeaders -> SecurityHeaders -> BodyLimit -> SealGuard -> mux
+	handler := middleware.ProxyHeaders(s.cfg.RPID)(middleware.SecurityHeaders(bodyLimitMiddleware(middleware.SealGuard(s.sealMgr)(mux))))
 	return handler
 }
 
@@ -249,9 +261,10 @@ func (s *Server) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 
 	s.sessions.SetCookie(w, sess.ID, isSecureRequest(r))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     "registered",
-		"csrf_token": sess.CSRFToken,
-		"user":       user,
+		"status":        "registered",
+		"csrf_token":    sess.CSRFToken,
+		"credential_id": base64.RawURLEncoding.EncodeToString(sess.CredentialID),
+		"user":          user,
 	})
 }
 
@@ -292,15 +305,23 @@ func (s *Server) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
 
 	s.sessions.SetCookie(w, sess.ID, isSecureRequest(r))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     "logged_in",
-		"csrf_token": sess.CSRFToken,
-		"user":       user,
+		"status":        "logged_in",
+		"csrf_token":    sess.CSRFToken,
+		"credential_id": base64.RawURLEncoding.EncodeToString(sess.CredentialID),
+		"user":          user,
 	})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(auth.SessionCookieName)
 	if err == nil && cookie.Value != "" {
+		if sess, sErr := s.sessions.GetSession(cookie.Value); sErr == nil && sess != nil {
+			csrfHeader := r.Header.Get("X-CSRF-Token")
+			if csrfHeader == "" || subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(sess.CSRFToken)) != 1 {
+				writeError(w, http.StatusForbidden, "invalid_csrf_token", "CSRF validation failed")
+				return
+			}
+		}
 		s.sessions.InvalidateSession(cookie.Value)
 	}
 	s.sessions.ClearCookie(w, isSecureRequest(r))
@@ -324,7 +345,29 @@ func (s *Server) handleGetMe(w http.ResponseWriter, r *http.Request) {
 
 // ---------------- Device Verification Handlers ----------------
 
+func (s *Server) isAlreadyAuthenticatedDevice(r *http.Request) bool {
+	cookie, err := r.Cookie(auth.SessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	sess, err := s.sessions.GetSession(cookie.Value)
+	if err != nil || sess == nil {
+		return false
+	}
+	if len(sess.CredentialID) > 0 {
+		if cred, cErr := s.db.GetCredentialByID(r.Context(), sess.CredentialID); cErr == nil && cred != nil && cred.Status == "verified" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleDeviceRequestInitiate(w http.ResponseWriter, r *http.Request) {
+	if s.isAlreadyAuthenticatedDevice(r) {
+		writeError(w, http.StatusBadRequest, "already_verified_device", "This device is already verified and signed in. Please initiate pairing on the new unverified device.")
+		return
+	}
+
 	var payload auth.RequestInitiatePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request body")
@@ -376,13 +419,25 @@ func (s *Server) handleDeviceRequestApprove(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		appPub, err = base64.StdEncoding.DecodeString(body.ApproverECDHPub)
 	}
+	if err != nil || len(appPub) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_approver_ecdh_pub", "Invalid approver_ecdh_pub base64")
+		return
+	}
 	encMEK, err := base64.RawURLEncoding.DecodeString(body.EncryptedMEKTransfer)
 	if err != nil {
 		encMEK, err = base64.StdEncoding.DecodeString(body.EncryptedMEKTransfer)
 	}
+	if err != nil || len(encMEK) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_encrypted_mek_transfer", "Invalid encrypted_mek_transfer base64")
+		return
+	}
 	tIV, err := base64.RawURLEncoding.DecodeString(body.TransferIV)
 	if err != nil {
 		tIV, err = base64.StdEncoding.DecodeString(body.TransferIV)
+	}
+	if err != nil || len(tIV) != 12 {
+		writeError(w, http.StatusBadRequest, "invalid_transfer_iv", "Invalid transfer_iv: must be 12 bytes")
+		return
 	}
 
 	err = s.devMgr.ApproveRequest(
@@ -416,6 +471,11 @@ func (s *Server) handleDeviceRequestStatus(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleDeviceRequestComplete(w http.ResponseWriter, r *http.Request) {
+	if s.isAlreadyAuthenticatedDevice(r) {
+		writeError(w, http.StatusBadRequest, "already_verified_device", "This device is already verified and signed in. Please complete pairing on the new unverified device.")
+		return
+	}
+
 	reqID := r.PathValue("id")
 	var body struct {
 		Attestation  json.RawMessage `json:"attestation"`
@@ -431,9 +491,17 @@ func (s *Server) handleDeviceRequestComplete(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		mekBytes, err = base64.StdEncoding.DecodeString(body.WrappedMEK)
 	}
+	if err != nil || len(mekBytes) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_wrapped_mek", "Invalid wrapped_mek base64")
+		return
+	}
 	ivBytes, err := base64.RawURLEncoding.DecodeString(body.WrappedMEKIV)
 	if err != nil {
 		ivBytes, err = base64.StdEncoding.DecodeString(body.WrappedMEKIV)
+	}
+	if err != nil || len(ivBytes) != 12 {
+		writeError(w, http.StatusBadRequest, "invalid_wrapped_mek_iv", "Invalid wrapped_mek_iv: must be 12 bytes")
+		return
 	}
 
 	sess, err := s.devMgr.CompleteRequest(r.Context(), reqID, body.Attestation, mekBytes, ivBytes, middleware.GetIP(r))
@@ -444,8 +512,9 @@ func (s *Server) handleDeviceRequestComplete(w http.ResponseWriter, r *http.Requ
 
 	s.sessions.SetCookie(w, sess.ID, isSecureRequest(r))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     "enrolled",
-		"csrf_token": sess.CSRFToken,
+		"status":        "enrolled",
+		"csrf_token":    sess.CSRFToken,
+		"credential_id": base64.RawURLEncoding.EncodeToString(sess.CredentialID),
 	})
 }
 
@@ -673,6 +742,14 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "key_payload_too_large", err.Error())
 			return
 		}
+		if errors.Is(err, keys.ErrDuplicateKey) {
+			writeError(w, http.StatusBadRequest, "duplicate_key", err.Error())
+			return
+		}
+		if errors.Is(err, keys.ErrKeyNotFound) {
+			writeError(w, http.StatusNotFound, "key_not_found", err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "update_failed", err.Error())
 		return
 	}
@@ -702,6 +779,10 @@ func (s *Server) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 		middleware.GetIP(r),
 	)
 	if err != nil {
+		if errors.Is(err, keys.ErrKeyNotFound) {
+			writeError(w, http.StatusNotFound, "key_not_found", err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "delete_failed", err.Error())
 		return
 	}

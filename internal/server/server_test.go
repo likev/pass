@@ -440,7 +440,7 @@ func TestDeviceRequestAPI(t *testing.T) {
 
 	session, _ := sessionMgr.CreateSession(userID, credID)
 
-	// 1. New Phone initiates add_phone request
+	// 1. New Phone (unauthenticated) initiates add_phone request
 	initPayload := map[string]string{
 		"username":               username,
 		"action_type":            "add_phone",
@@ -449,6 +449,15 @@ func TestDeviceRequestAPI(t *testing.T) {
 		"verification_code_hash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
 	}
 	initBytes, _ := json.Marshal(initPayload)
+
+	// 1a. Verified Device CANNOT initiate a new-device request for itself while signed in
+	reqSelfInit := httptest.NewRequest("POST", "/api/v1/devices/request", bytes.NewBuffer(initBytes))
+	reqSelfInit.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session.ID})
+	wSelfInit := httptest.NewRecorder()
+	handler.ServeHTTP(wSelfInit, reqSelfInit)
+	if wSelfInit.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when already-verified device initiates pairing, got %d: %s", wSelfInit.Code, wSelfInit.Body.String())
+	}
 	reqInit := httptest.NewRequest("POST", "/api/v1/devices/request", bytes.NewBuffer(initBytes))
 	wInit := httptest.NewRecorder()
 	handler.ServeHTTP(wInit, reqInit)
@@ -764,5 +773,46 @@ func TestKeyCreationLimits(t *testing.T) {
 	_ = json.Unmarshal(wUp.Body.Bytes(), &upErrResp)
 	if upErrResp["error"] != "key_payload_too_large" {
 		t.Fatalf("expected key_payload_too_large for update, got %+v", upErrResp)
+	}
+}
+
+func TestStaticUIAssetsAndI18n(t *testing.T) {
+	_, handler, database, _, _, tempDir := setupTestServer(t)
+	defer os.RemoveAll(tempDir)
+	defer database.Close()
+
+	for _, asset := range []struct {
+		path     string
+		contains []string
+	}{
+		{
+			path:     "/",
+			contains: []string{"single-device-warning", "btn-warning-add-device", "btn-lang-en", "btn-lang-zh", "unauth-new-device-view", "verified-device-view"},
+		},
+		{
+			path:     "/js/i18n.js",
+			contains: []string{"detectInitialLanguage", "singleDeviceTitle", "单设备数据丢失风险提示"},
+		},
+		{
+			path:     "/js/app.js",
+			contains: []string{"checkDeviceSafety", "updateSingleDeviceWarning", "I18n.applyDOMTranslations"},
+		},
+		{
+			path:     "/css/styles.css",
+			contains: []string{".warning-banner", ".lang-switch"},
+		},
+	} {
+		req := httptest.NewRequest("GET", asset.path, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for %s, got %d", asset.path, w.Code)
+		}
+		body := w.Body.String()
+		for _, sub := range asset.contains {
+			if !strings.Contains(body, sub) {
+				t.Fatalf("expected %s to contain %q", asset.path, sub)
+			}
+		}
 	}
 }

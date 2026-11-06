@@ -10,9 +10,9 @@
   <!-- 3-Minute Clipboard Auto-Clear Banner -->
   <div id="banner-clipboard" class="clipboard-banner" style="display: none;">
     <div class="banner-content">
-      <span class="shield-icon">🛡️</span>
+      <span class="shield-icon" aria-hidden="true">🛡️</span>
       <span id="clipboard-text">Decrypted key in clipboard — auto-clearing in 02:59</span>
-      <button id="btn-clear-clipboard" class="btn btn-sm btn-clear-now">Clear Clipboard Now</button>
+      <button id="btn-clear-clipboard" class="btn btn-sm btn-clear-now" data-i18n="btnClearClipboardNow">Clear Now</button>
     </div>
     <div class="progress-container">
       <div id="clipboard-progress-bar" class="progress-bar"></div>
@@ -22,91 +22,140 @@
   <div class="app-container">
     <header class="app-header">
       <div class="brand">
-        <span class="logo-icon">🔐</span>
-        <h1>Web Key Manager</h1>
-        <span class="badge badge-zero-knowledge">E2EE Zero-Knowledge</span>
+        <div class="brand-logo" aria-hidden="true">🔐</div>
+        <div class="brand-text">
+          <h1 data-i18n="brandTitle">Web Key Manager</h1>
+          <span class="badge badge-zero-knowledge" data-i18n="badgeZeroKnowledge">E2EE Zero-Knowledge</span>
+        </div>
       </div>
-      <div id="header-user-actions" class="header-actions" style="display: none;">
-        <span id="user-display-name" class="user-name"></span>
-        <button id="btn-open-devices" class="btn btn-outline btn-sm">Devices</button>
-        <button id="btn-logout" class="btn btn-outline btn-sm">Sign Out</button>
+
+      <div class="header-right">
+        <div id="header-user-actions" class="header-actions" style="display: none;">
+          <span id="user-display-name" class="user-pill"></span>
+          <button id="btn-open-devices" class="btn btn-outline btn-sm">
+            <span aria-hidden="true">📱</span>
+            <span data-i18n="btnDevices">Devices</span>
+            <span id="devices-count-badge" class="count-pill" style="display: none;">1</span>
+          </button>
+          <button id="btn-logout" class="btn btn-ghost btn-sm" data-i18n="btnSignOut">Sign Out</button>
+        </div>
+
+        <div class="lang-switch" role="group" aria-label="Language switcher">
+          <button id="btn-lang-en" type="button" class="lang-btn active">EN</button>
+          <button id="btn-lang-zh" type="button" class="lang-btn">中文</button>
+        </div>
       </div>
     </header>
 
     <main class="main-content">
       <!-- 1. Unseal / Setup View -->
-      <section id="view-unseal" class="card view-card" style="display: none;">
-        <h2 id="unseal-title">Server Master Key Unseal</h2>
-        <p id="unseal-desc" class="text-muted">Enter the Admin Startup Passphrase to unseal SMK into mlock RAM.</p>
+      <section id="view-unseal" class="card view-card unseal-card" style="display: none;">
+        <div class="view-card-header">
+          <div class="view-icon" aria-hidden="true">🗝️</div>
+          <div>
+            <h2 id="unseal-title" data-i18n="unsealSealedTitle">Server Sealed</h2>
+            <p id="unseal-desc" class="text-muted" data-i18n="unsealSealedDesc">Enter the Admin Startup Passphrase to unseal the Server Master Key into mlock RAM.</p>
+          </div>
+        </div>
+
         <div id="unseal-alert" class="alert alert-error" style="display: none;"></div>
 
         <div class="form-group">
-          <label for="unseal-passphrase">Admin Startup Passphrase (min 12 chars)</label>
+          <label for="unseal-passphrase" data-i18n="unsealPassLabel">Admin Startup Passphrase (min 12 chars)</label>
           <input type="password" id="unseal-passphrase" class="form-control" placeholder="••••••••••••" autocomplete="current-password">
         </div>
         <div id="unseal-passphrase-confirm-row" class="form-group" style="display: none;">
-          <label for="unseal-passphrase-confirm">Confirm Admin Startup Passphrase</label>
+          <label for="unseal-passphrase-confirm" data-i18n="unsealPassConfirmLabel">Confirm Admin Startup Passphrase</label>
           <input type="password" id="unseal-passphrase-confirm" class="form-control" placeholder="••••••••••••" autocomplete="new-password">
         </div>
-        <button id="btn-unseal-submit" class="btn btn-primary btn-block">Unseal Server</button>
+        <button id="btn-unseal-submit" class="btn btn-primary btn-block" data-i18n="unsealSealedBtn">Unseal Server</button>
       </section>
 
       <!-- 2. Passkey Auth View -->
-      <section id="view-auth" class="card view-card" style="display: none;">
-        <div class="auth-tabs">
-          <h2>Passkey Authentication</h2>
-          <p class="text-muted">No master passwords or plaintext secrets. Protected by WebAuthn hardware biometric passkeys with PRF client-side encryption.</p>
+      <section id="view-auth" class="view-auth-wrapper" style="display: none;">
+        <div class="auth-hero">
+          <h2 data-i18n="authTitle">Passkey Authentication</h2>
+          <p class="text-muted" data-i18n="authSubtitle">Zero master passwords. Hardware-backed WebAuthn passkeys with client-side PRF envelope encryption.</p>
         </div>
+
         <div id="auth-alert" class="alert alert-error" style="display: none;"></div>
 
         <div class="auth-split">
           <!-- Login -->
-          <div class="auth-column">
-            <h3>Sign In with Passkey</h3>
-            <div class="form-group">
-              <label for="login-username">Username (Optional for discoverable passkey)</label>
-              <input type="text" id="login-username" class="form-control" placeholder="alice" autocomplete="username webauthn">
+          <div class="card auth-column">
+            <div class="auth-col-header">
+              <h3 data-i18n="loginHeading">Sign In</h3>
+              <p class="text-muted small" data-i18n="loginDesc">Authenticate with an existing passkey on this device.</p>
             </div>
-            <button id="btn-login" class="btn btn-primary btn-block">Sign In with Passkey</button>
+            <div class="form-group">
+              <label for="login-username" data-i18n="loginUsernameLabel">Username *</label>
+              <input type="text" id="login-username" class="form-control" placeholder="alice" data-i18n-placeholder="loginUsernamePlaceholder" autocomplete="username webauthn" required>
+            </div>
+            <div class="auth-actions-stack">
+              <button id="btn-login" class="btn btn-primary btn-block" data-i18n="btnLogin">Sign In with Passkey</button>
+              <button id="btn-auth-pair-phone" class="btn btn-outline btn-block">
+                <span aria-hidden="true">📱</span>
+                <span data-i18n="btnConnectOrReplacePhone">Connect or Replace Phone</span>
+              </button>
+            </div>
           </div>
 
-          <div class="auth-divider">OR</div>
-
           <!-- Register -->
-          <div class="auth-column">
-            <h3>Register First Device</h3>
-            <div class="form-group">
-              <label for="reg-username">Username *</label>
-              <input type="text" id="reg-username" class="form-control" placeholder="alice" autocomplete="username">
+          <div class="card auth-column">
+            <div class="auth-col-header">
+              <h3 data-i18n="registerHeading">Register First Device</h3>
+              <p class="text-muted small" data-i18n="registerDesc">Create a new account and bind your primary hardware passkey.</p>
             </div>
             <div class="form-group">
-              <label for="reg-display-name">Display Name</label>
-              <input type="text" id="reg-display-name" class="form-control" placeholder="Alice Smith">
+              <label for="reg-username" data-i18n="regUsernameLabel">Username *</label>
+              <input type="text" id="reg-username" class="form-control" placeholder="alice" data-i18n-placeholder="regUsernamePlaceholder" autocomplete="username">
             </div>
-            <div class="form-group">
-              <label for="reg-device-name">Device Name</label>
-              <input type="text" id="reg-device-name" class="form-control" placeholder="MacBook Pro / Pixel 9">
+            <div class="form-row-2">
+              <div class="form-group">
+                <label for="reg-display-name" data-i18n="regDisplayNameLabel">Display Name</label>
+                <input type="text" id="reg-display-name" class="form-control" placeholder="Alice Smith" data-i18n-placeholder="regDisplayNamePlaceholder">
+              </div>
+              <div class="form-group">
+                <label for="reg-device-name" data-i18n="regDeviceNameLabel">Device Name</label>
+                <input type="text" id="reg-device-name" class="form-control" placeholder="MacBook Pro / Pixel 9" data-i18n-placeholder="regDeviceNamePlaceholder">
+              </div>
             </div>
-            <button id="btn-register" class="btn btn-secondary btn-block">Create Passkey & Register</button>
+            <button id="btn-register" class="btn btn-secondary btn-block" data-i18n="btnRegister">Create Passkey & Register</button>
           </div>
         </div>
       </section>
 
       <!-- 3. Main Dashboard View -->
       <section id="view-dashboard" class="dashboard-section" style="display: none;">
+        <!-- Single-Device Data Loss Warning Banner -->
+        <div id="single-device-warning" class="warning-banner" style="display: none;">
+          <div class="warning-banner-icon" aria-hidden="true">⚠️</div>
+          <div class="warning-banner-body">
+            <strong data-i18n="singleDeviceTitle">Single-Device Data Loss Risk</strong>
+            <p data-i18n="singleDeviceDesc">You only have 1 verified device enrolled. Because your keys are encrypted with your hardware Passkey, all data will be permanently lost if this phone or device is broken, lost, or stolen.</p>
+          </div>
+          <div class="warning-banner-action">
+            <button id="btn-warning-add-device" class="btn btn-warning btn-sm" data-i18n="btnAddBackupDevice">+ Add Backup Device</button>
+          </div>
+        </div>
+
         <div class="dashboard-toolbar">
           <div class="search-box">
-            <input type="text" id="keys-filter" class="form-control" placeholder="🔍 Filter keys by name (metadata only)...">
+            <span class="search-icon" aria-hidden="true">🔍</span>
+            <input type="text" id="keys-filter" class="form-control search-input" placeholder="Filter keys by name (metadata only)..." data-i18n-placeholder="keysFilterPlaceholder">
           </div>
-          <button id="btn-open-create-key" class="btn btn-primary">+ Create New Key</button>
+          <button id="btn-open-create-key" class="btn btn-primary" data-i18n="btnCreateNewKey">+ Create New Key</button>
         </div>
 
         <div id="keys-alert" class="alert alert-info" style="display: none;"></div>
 
         <div class="card keys-card">
           <div class="card-header">
-            <h3>Stored Keys</h3>
-            <small class="text-muted">Strictly gated single-key retrieval with Passkey verification</small>
+            <div>
+              <h3 data-i18n="storedKeysTitle">Stored Keys</h3>
+              <small class="text-muted" data-i18n="storedKeysSubtitle">Each key retrieval requires live hardware Passkey verification</small>
+            </div>
+            <span id="keys-count-badge" class="badge badge-neutral">0</span>
           </div>
           <ul id="keys-list" class="keys-list"></ul>
         </div>
@@ -117,71 +166,78 @@
     <div id="modal-create-key" class="modal-overlay" style="display: none;">
       <div class="modal-content card">
         <div class="modal-header">
-          <h3>Create New Key</h3>
-          <button id="btn-close-create-key" class="modal-close">&times;</button>
+          <h3 data-i18n="modalCreateKeyTitle">Create New Key</h3>
+          <button id="btn-close-create-key" class="modal-close" aria-label="Close">&times;</button>
         </div>
         <div id="create-key-alert" class="alert alert-error" style="display: none;"></div>
 
         <div class="form-group">
-          <label for="key-name">Key Name (e.g. prod-aws-secret, github-pat) *</label>
-          <input type="text" id="key-name" class="form-control" placeholder="my-service-key" spellcheck="false">
+          <label for="key-name" data-i18n="keyNameLabel">Key Name (e.g. prod-aws-secret, github-pat) *</label>
+          <input type="text" id="key-name" class="form-control" placeholder="my-service-key" data-i18n-placeholder="keyNamePlaceholder" spellcheck="false">
         </div>
 
         <!-- 3-Mode Selection Tabs -->
         <div class="tabs-nav">
-          <button id="tab-type" class="tab active">1. Type Manually</button>
-          <button id="tab-paste" class="tab">2. Paste Key</button>
-          <button id="tab-gen" class="tab">3. Auto-Generate</button>
+          <button id="tab-type" class="tab active" data-i18n="tabType">1. Type Manually</button>
+          <button id="tab-paste" class="tab" data-i18n="tabPaste">2. Paste Key</button>
+          <button id="tab-gen" class="tab" data-i18n="tabGen">3. Auto-Generate</button>
         </div>
 
         <!-- Mode A: Type Twice -->
         <div id="section-type" class="tab-pane">
-          <p class="text-muted small">Because secrets are never shown on screen, please type your secret twice to verify byte-for-byte match.</p>
+          <p class="text-muted small mode-hint" data-i18n="modeTypeHint">Secrets are never shown in plaintext. Type your secret twice to verify a byte-for-byte match.</p>
           <div class="form-group">
-            <label for="key-type-primary">Enter Key *</label>
+            <label for="key-type-primary" data-i18n="keyTypePrimaryLabel">Enter Secret Key *</label>
             <input type="password" id="key-type-primary" class="form-control masked-input" placeholder="••••••••••••" autocomplete="new-password" spellcheck="false">
           </div>
           <div class="form-group">
-            <label for="key-type-confirm">Confirm Key (paste disabled) *</label>
+            <label for="key-type-confirm" data-i18n="keyTypeConfirmLabel">Confirm Secret Key (paste disabled) *</label>
             <input type="password" id="key-type-confirm" class="form-control masked-input" placeholder="••••••••••••" autocomplete="new-password" spellcheck="false">
           </div>
         </div>
 
         <!-- Mode B: Paste -->
         <div id="section-paste" class="tab-pane" style="display: none;">
-          <p class="text-muted small">Paste key directly from system clipboard into ephemeral RAM. Plaintext is never stored in DOM.</p>
+          <p class="text-muted small mode-hint" data-i18n="modePasteHint">Read directly from your system clipboard into ephemeral RAM. Plaintext is never rendered in the DOM.</p>
           <div class="paste-box">
-            <button id="btn-paste-capture" type="button" class="btn btn-secondary">📋 Paste from Clipboard</button>
-            <span id="paste-status-badge" class="badge badge-neutral">No pasted key captured yet.</span>
+            <button id="btn-paste-capture" type="button" class="btn btn-secondary">
+              <span aria-hidden="true">📋</span>
+              <span data-i18n="btnPasteCapture">Paste from Clipboard</span>
+            </button>
+            <span id="paste-status-badge" class="badge badge-neutral" data-i18n="pasteStatusEmpty">No pasted key captured yet.</span>
           </div>
-          <p class="text-muted small">Note: Pasting automatically starts the 3-minute clipboard auto-clear timer to wipe the secret from your OS clipboard.</p>
+          <p class="text-muted small" data-i18n="modePasteNote">Pasting automatically starts the 3-minute clipboard auto-clear timer to wipe the secret from your OS clipboard.</p>
         </div>
 
         <!-- Mode C: Auto-Generate -->
         <div id="section-gen" class="tab-pane" style="display: none;">
-          <p class="text-muted small">Generate unbiased high-entropy keys via in-memory CSPRNG rejection sampling. Never rendered in DOM.</p>
+          <p class="text-muted small mode-hint" data-i18n="modeGenHint">Generate unbiased high-entropy secrets in memory via CSPRNG rejection sampling. Never rendered in the DOM.</p>
           <div class="form-group">
-            <label for="gen-preset">Format Preset</label>
+            <label for="gen-preset" data-i18n="genPresetLabel">Format Preset</label>
             <select id="gen-preset" class="form-control">
-              <option value="password">Random Password (A-Z, a-z, 0-9, Symbols)</option>
-              <option value="hex">Hex Key (256-bit / 64 hex chars)</option>
-              <option value="base64url">Base64URL Secret (256-bit)</option>
+              <option value="password" data-i18n="genPresetPassword">Random Password (A-Z, a-z, 0-9, Symbols)</option>
+              <option value="hex" data-i18n="genPresetHex">Hex Key (256-bit / 64 hex chars)</option>
+              <option value="base64url" data-i18n="genPresetBase64Url">Base64URL Secret (256-bit)</option>
             </select>
           </div>
           <div class="form-group">
-            <label for="gen-length">Length: <span id="gen-length-val">32</span> characters</label>
+            <label for="gen-length">
+              <span data-i18n="genLengthLabelPrefix">Length:</span>
+              <strong id="gen-length-val">32</strong>
+              <span data-i18n="genLengthLabelSuffix">characters</span>
+            </label>
             <input type="range" id="gen-length" min="16" max="128" value="32" class="form-range">
           </div>
           <div class="form-group checkbox-group">
-            <label>
+            <label class="checkbox-label">
               <input type="checkbox" id="gen-copy-checkbox" checked>
-              Also copy generated key to clipboard (auto-clears in 3 minutes)
+              <span data-i18n="genCopyCheckboxLabel">Also copy generated key to clipboard (auto-clears in 3 minutes)</span>
             </label>
           </div>
         </div>
 
         <div class="modal-footer">
-          <button id="btn-save-key" class="btn btn-primary btn-block">Encrypt & Save with Passkey</button>
+          <button id="btn-save-key" class="btn btn-primary btn-block" data-i18n="btnSaveKey">Encrypt & Save with Passkey</button>
         </div>
       </div>
     </div>
@@ -190,31 +246,77 @@
     <div id="modal-devices" class="modal-overlay" style="display: none;">
       <div class="modal-content card">
         <div class="modal-header">
-          <h3>Verified Devices & Phone Management</h3>
-          <button id="btn-close-devices" class="modal-close">&times;</button>
+          <div>
+            <h3 id="modal-devices-title" data-i18n="modalDevicesTitle">Verified Devices & Phone Pairing</h3>
+            <p id="modal-devices-subtitle" class="text-muted small" data-i18n="modalDevicesSubtitle">Enroll a secondary phone or computer so you never lose access if a device is broken or stolen.</p>
+          </div>
+          <button id="btn-close-devices" class="modal-close" aria-label="Close">&times;</button>
         </div>
+
         <div id="devices-alert" class="alert alert-error" style="display: none;"></div>
 
-        <div class="device-actions-bar">
-          <button id="btn-add-phone" class="btn btn-outline btn-sm">📱 Connect New Phone</button>
-          <button id="btn-change-phone" class="btn btn-outline btn-sm">🔄 Replace Old Phone</button>
+        <!-- A. Unauthenticated New-Device Pairing Section (ONLY shown on unverified new devices) -->
+        <div id="unauth-new-device-view" style="display: none;">
+          <div id="new-device-form-section">
+            <div class="form-group">
+              <label for="pair-username" data-i18n="pairUsernameLabel">Your Account Username *</label>
+              <input type="text" id="pair-username" class="form-control" placeholder="alice" data-i18n-placeholder="pairUsernamePlaceholder" autocomplete="username">
+            </div>
+            <div class="form-group">
+              <label for="pair-device-name" data-i18n="pairDeviceNameLabel">Name for This New Device *</label>
+              <input type="text" id="pair-device-name" class="form-control" placeholder="iPhone 16 / Pixel 9 / Backup Laptop" data-i18n-placeholder="pairDeviceNamePlaceholder">
+            </div>
+            <div class="form-group">
+              <label data-i18n="pairActionLabel">Pairing Mode</label>
+              <div class="tabs-nav tabs-nav-2">
+                <button id="btn-add-phone" type="button" class="tab active" data-i18n="btnAddPhone">Add as Backup Device</button>
+                <button id="btn-change-phone" type="button" class="tab" data-i18n="btnChangePhone">Replace Old Phone</button>
+              </div>
+            </div>
+            <button id="btn-start-pairing" type="button" class="btn btn-primary btn-block" data-i18n="btnStartPairingCode">Generate 6-Digit Pairing Code</button>
+          </div>
+
+          <!-- New Phone Handshake Display Section -->
+          <div id="new-phone-section" class="card highlight-card" style="display: none;">
+            <h4 data-i18n="newPhonePairingTitle">New Device Pairing Code</h4>
+            <p class="small text-muted" data-i18n="newPhonePairingHint">On your already-verified device, open "Devices" and enter this 6-digit code under Pending Approval Requests:</p>
+            <div id="new-phone-code-display" class="pairing-code">--- ---</div>
+            <div id="new-phone-status-text" class="status-indicator" data-i18n="newPhoneWaitingStatus">Waiting for approval on your verified device...</div>
+          </div>
         </div>
 
-        <!-- New Phone Handshake Display Section -->
-        <div id="new-phone-section" class="card highlight-card" style="display: none;">
-          <h4>New Phone Pairing Code</h4>
-          <p class="small text-muted">Enter this 6-digit code on an already-verified device to authorize this phone:</p>
-          <div id="new-phone-code-display" class="pairing-code">--- ---</div>
-          <div id="new-phone-status-text" class="status-indicator">Waiting for approval on verified device...</div>
+        <!-- B. Authenticated Verified-Device Approver Section (ONLY shown on already-verified devices) -->
+        <div id="verified-device-view" style="display: none;">
+          <!-- Modal Single-Device Warning -->
+          <div id="modal-single-device-tip" class="warning-banner warning-banner-compact" style="display: none;">
+            <div class="warning-banner-icon" aria-hidden="true">⚠️</div>
+            <div class="warning-banner-body">
+              <strong data-i18n="singleDeviceTitle">Single-Device Data Loss Risk</strong>
+              <p data-i18n="singleDeviceDesc">You only have 1 verified device enrolled. Because your keys are encrypted with your hardware Passkey, all data will be permanently lost if this phone or device is broken, lost, or stolen.</p>
+            </div>
+          </div>
+
+          <div class="pairing-guide-card">
+            <h4 data-i18n="verifiedGuideTitle">How to Add or Replace a Device</h4>
+            <ol class="pairing-steps">
+              <li data-i18n="verifiedGuideStep1">1. Open this website on your NEW phone or computer (do not sign in; click "Connect or Replace Phone" on the Sign-In screen).</li>
+              <li data-i18n="verifiedGuideStep2">2. Enter your username on the new device to generate a 6-digit pairing code.</li>
+              <li data-i18n="verifiedGuideStep3">3. The request will appear automatically below under "Pending Approval Requests" — enter the 6-digit code here to approve.</li>
+            </ol>
+            <p class="pairing-guide-note" data-i18n="verifiedGuideNote">Note: This current device is already verified and acts as the Approver. You cannot add this same device again.</p>
+          </div>
+
+          <div class="section-divider"></div>
+          <div class="section-header-row">
+            <h4 class="section-heading" data-i18n="pendingRequestsHeading">Pending Approval Requests</h4>
+            <button id="btn-refresh-requests" type="button" class="btn btn-outline btn-sm" data-i18n="btnRefreshRequests">Refresh</button>
+          </div>
+          <ul id="pending-requests-list" class="device-list"></ul>
+
+          <div class="section-divider"></div>
+          <h4 class="section-heading" data-i18n="enrolledDevicesHeading">Enrolled Devices</h4>
+          <ul id="devices-list" class="device-list"></ul>
         </div>
-
-        <div class="section-divider"></div>
-        <h4>Pending Approval Requests</h4>
-        <ul id="pending-requests-list" class="device-list"></ul>
-
-        <div class="section-divider"></div>
-        <h4>Enrolled Verified Devices</h4>
-        <ul id="devices-list" class="device-list"></ul>
       </div>
     </div>
 

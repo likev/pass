@@ -85,7 +85,8 @@ func (bm *BackupManager) RunBackup(ctx context.Context) (string, error) {
 		}
 	}()
 
-	vacuumSQL := fmt.Sprintf("VACUUM INTO '%s'", tempSnapshotPath)
+	escapedSnapshotPath := strings.ReplaceAll(tempSnapshotPath, "'", "''")
+	vacuumSQL := fmt.Sprintf("VACUUM INTO '%s'", escapedSnapshotPath)
 	if _, err := bm.db.ExecContext(ctx, vacuumSQL); err != nil {
 		_ = bm.db.InsertAuditLog(ctx, nil, "backup_failure", "", fmt.Sprintf("VACUUM INTO failed: %v", err))
 		return "", fmt.Errorf("VACUUM INTO failed: %w", err)
@@ -102,6 +103,7 @@ func (bm *BackupManager) RunBackup(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read snapshot: %w", err)
 	}
+	defer clear(snapshotRaw)
 
 	var compressedBuf bytes.Buffer
 	gzWriter := gzip.NewWriter(&compressedBuf)
@@ -261,10 +263,17 @@ func RestoreBackup(backupFilePath string, smk []byte, targetPath string) error {
 	}
 	defer gzReader.Close()
 
+	const maxDecompressedBytes = 512 * 1024 * 1024 // 512 MB cap against decompression bombs
 	var decompressed bytes.Buffer
-	if _, err := io.Copy(&decompressed, gzReader); err != nil {
+	limitedReader := io.LimitReader(gzReader, maxDecompressedBytes+1)
+	n, err := io.Copy(&decompressed, limitedReader)
+	if err != nil {
 		return fmt.Errorf("gzip decompression failed: %w", err)
 	}
+	if n > maxDecompressedBytes {
+		return errors.New("restored backup exceeds maximum allowed database size")
+	}
+	defer clear(decompressed.Bytes())
 
 	// Write restored DB
 	if err := os.WriteFile(targetPath, decompressed.Bytes(), 0600); err != nil {

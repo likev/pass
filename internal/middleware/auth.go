@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 
@@ -39,10 +40,10 @@ func RequireAuth(sm *auth.SessionManager) func(http.Handler) http.Handler {
 				return
 			}
 
-			// CSRF protection on mutating methods
-			if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			// CSRF protection on all state-mutating methods
+			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 				csrfHeader := r.Header.Get("X-CSRF-Token")
-				if csrfHeader == "" || csrfHeader != sess.CSRFToken {
+				if csrfHeader == "" || subtle.ConstantTimeCompare([]byte(csrfHeader), []byte(sess.CSRFToken)) != 1 {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusForbidden)
 					_ = json.NewEncoder(w).Encode(map[string]string{

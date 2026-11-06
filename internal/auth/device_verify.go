@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,7 +40,23 @@ func NewDeviceManager(database *db.DB, as *AuthService, sm *SessionManager) *Dev
 		sessions:    sm,
 		regSessions: make(map[string]*regSessionEntry),
 	}
+	go dm.cleanExpiredSessions()
 	return dm
+}
+
+func (dm *DeviceManager) cleanExpiredSessions() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		dm.mu.Lock()
+		for k, v := range dm.regSessions {
+			if now.After(v.expiresAt) {
+				delete(dm.regSessions, k)
+			}
+		}
+		dm.mu.Unlock()
+	}
 }
 
 // RequestInitiatePayload defines the incoming payload for POST /api/v1/devices/request
@@ -53,15 +71,38 @@ type RequestInitiatePayload struct {
 
 // InitiateRequest is called by the new phone to begin device verification
 func (dm *DeviceManager) InitiateRequest(ctx context.Context, payload *RequestInitiatePayload) (string, int, error) {
-	if payload.Username == "" || payload.DeviceName == "" || payload.NewDeviceECDHPub == "" || payload.VerificationCodeHash == "" {
+	if payload == nil {
+		return "", 0, ErrInvalidRequest
+	}
+	username := strings.TrimSpace(payload.Username)
+	deviceName := strings.TrimSpace(payload.DeviceName)
+	codeHash := strings.TrimSpace(payload.VerificationCodeHash)
+
+	if username == "" || len(username) > 128 || deviceName == "" || len(deviceName) > 128 || payload.NewDeviceECDHPub == "" || codeHash == "" || len(codeHash) > 128 {
 		return "", 0, ErrInvalidRequest
 	}
 	if payload.ActionType != "add_phone" && payload.ActionType != "change_phone" {
 		return "", 0, errors.New("action_type must be add_phone or change_phone")
 	}
 
-	user, err := dm.db.GetUserByUsername(ctx, payload.Username)
+	user, err := dm.db.GetUserByUsername(ctx, username)
 	if err != nil || user == nil {
+		return "", 0, ErrUserNotFound
+	}
+
+	// Ensure user has at least one active verified credential to approve the request
+	creds, err := dm.db.GetCredentialsByUserID(ctx, user.ID)
+	if err != nil {
+		return "", 0, ErrUserNotFound
+	}
+	hasVerified := false
+	for _, c := range creds {
+		if c.Status == "verified" {
+			hasVerified = true
+			break
+		}
+	}
+	if !hasVerified {
 		return "", 0, ErrUserNotFound
 	}
 
@@ -71,12 +112,12 @@ func (dm *DeviceManager) InitiateRequest(ctx context.Context, payload *RequestIn
 		if err != nil {
 			replaceCredID, err = base64.StdEncoding.DecodeString(payload.ReplaceCredentialID)
 		}
-		if err != nil {
+		if err != nil || len(replaceCredID) == 0 {
 			return "", 0, errors.New("invalid replace_credential_id base64")
 		}
-		// Verify old credential exists and belongs to user
+		// Verify old credential exists, belongs to user, and is currently verified
 		c, err := dm.db.GetCredentialByID(ctx, replaceCredID)
-		if err != nil || c == nil || c.UserID != user.ID {
+		if err != nil || c == nil || c.UserID != user.ID || c.Status != "verified" {
 			return "", 0, errors.New("replace_credential_id not found for this user")
 		}
 	}
@@ -85,7 +126,7 @@ func (dm *DeviceManager) InitiateRequest(ctx context.Context, payload *RequestIn
 	if err != nil {
 		newECDHPub, err = base64.StdEncoding.DecodeString(payload.NewDeviceECDHPub)
 	}
-	if err != nil || len(newECDHPub) == 0 {
+	if err != nil || len(newECDHPub) == 0 || len(newECDHPub) > 256 {
 		return "", 0, errors.New("invalid new_device_ecdh_pub base64")
 	}
 
@@ -99,8 +140,8 @@ func (dm *DeviceManager) InitiateRequest(ctx context.Context, payload *RequestIn
 		UserID:               user.ID,
 		ActionType:           payload.ActionType,
 		ReplaceCredentialID:  replaceCredID,
-		NewDeviceName:        payload.DeviceName,
-		VerificationCodeHash: payload.VerificationCodeHash,
+		NewDeviceName:        deviceName,
+		VerificationCodeHash: codeHash,
 		NewDeviceECDHPub:     newECDHPub,
 		ExpiresAt:            expiresAt,
 	}
@@ -130,6 +171,10 @@ func (dm *DeviceManager) ApproveRequest(
 	encryptedMEKTransfer []byte,
 	transferIV []byte,
 ) error {
+	if len(approverECDHPub) == 0 || len(encryptedMEKTransfer) == 0 || len(transferIV) == 0 {
+		return ErrInvalidRequest
+	}
+
 	_ = dm.db.ExpireOldDeviceRequests(ctx)
 
 	req, err := dm.db.GetDeviceRequestByID(ctx, requestID)
@@ -146,10 +191,13 @@ func (dm *DeviceManager) ApproveRequest(
 		return ErrDeviceRequestExpired
 	}
 
-	// Verify step-up assertion
+	// Verify step-up assertion and ensure the assertion belongs to the authenticated user
 	verifiedCred, err := dm.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes)
 	if err != nil {
 		return fmt.Errorf("approval assertion failed: %w", err)
+	}
+	if verifiedCred.UserID != userID {
+		return fmt.Errorf("approval assertion failed: %w", ErrInvalidCredential)
 	}
 
 	// Prepare WebAuthn registration options for the new device
@@ -251,6 +299,10 @@ func (dm *DeviceManager) CompleteRequest(
 	wrappedMEKIV []byte,
 	ipAddr string,
 ) (*SessionInfo, error) {
+	if len(wrappedMEK) == 0 || len(wrappedMEKIV) != 12 {
+		return nil, ErrInvalidRequest
+	}
+
 	req, err := dm.db.GetDeviceRequestByID(ctx, requestID)
 	if err != nil || req == nil {
 		return nil, ErrDeviceRequestNotFound
@@ -292,6 +344,12 @@ func (dm *DeviceManager) CompleteRequest(
 		return nil, fmt.Errorf("failed to verify new device credential: %w", err)
 	}
 
+	for _, existing := range waUser.WebAuthnCredentials() {
+		if bytes.Equal(existing.ID, cred.ID) {
+			return nil, errors.New("this credential is already registered as a verified device")
+		}
+	}
+
 	transportsJSON, _ := json.Marshal(cred.Transport)
 	dbCred := &db.Credential{
 		ID:              cred.ID,
@@ -324,6 +382,10 @@ func (dm *DeviceManager) CompleteRequest(
 		return nil, fmt.Errorf("failed to atomically complete enrollment: %w", err)
 	}
 
+	if len(revokeCredID) > 0 && dm.sessions != nil {
+		dm.sessions.InvalidateSessionsByCredentialID(revokeCredID)
+	}
+
 	// Issue session for the new device
 	return dm.sessions.CreateSession(req.UserID, cred.ID)
 }
@@ -340,7 +402,7 @@ func (dm *DeviceManager) RevokeDevice(ctx context.Context, userID string, credID
 	for _, c := range creds {
 		if c.Status == "verified" {
 			verifiedCount++
-			if string(c.ID) == string(credID) {
+			if bytes.Equal(c.ID, credID) {
 				targetExists = true
 			}
 		}
@@ -353,15 +415,27 @@ func (dm *DeviceManager) RevokeDevice(ctx context.Context, userID string, credID
 		return ErrCannotRevokeLastDevice
 	}
 
-	// Step-up verification
-	if _, err := dm.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes); err != nil {
+	// Step-up verification and ownership check
+	verifiedCred, err := dm.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes)
+	if err != nil {
 		return fmt.Errorf("revocation assertion failed: %w", err)
+	}
+	if verifiedCred.UserID != userID {
+		return fmt.Errorf("revocation assertion failed: %w", ErrInvalidCredential)
 	}
 
 	if err := dm.db.RevokeCredential(ctx, credID, userID); err != nil {
 		return fmt.Errorf("failed to revoke credential: %w", err)
 	}
 
-	_ = dm.db.InsertAuditLog(ctx, &userID, "device_revoked", "", fmt.Sprintf("revoked credential %x", credID[:8]))
+	if dm.sessions != nil {
+		dm.sessions.InvalidateSessionsByCredentialID(credID)
+	}
+
+	logCredHex := fmt.Sprintf("%x", credID)
+	if len(credID) >= 8 {
+		logCredHex = fmt.Sprintf("%x", credID[:8])
+	}
+	_ = dm.db.InsertAuditLog(ctx, &userID, "device_revoked", "", fmt.Sprintf("revoked credential %s", logCredHex))
 	return nil
 }

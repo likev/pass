@@ -6,6 +6,7 @@ export const ClipboardGuard = {
   clearTimer: null,
   updateInterval: null,
   targetTime: 0,
+  hasActiveSecret: false,
   pendingImmediateClear: false,
   activeReason: null, // "copied" | "pasted" | "generated"
   onTickCallback: null,
@@ -15,47 +16,52 @@ export const ClipboardGuard = {
     this.onTickCallback = onTick;
     this.onClearCallback = onClear;
 
-    // Background tab focus recovery handlers
-    const handleRefocus = async () => {
+    // Retry pending clear on real user activation gestures (pointerdown / keydown)
+    // Note: window 'focus' and 'visibilitychange' are NOT user activation events in modern browsers
+    // and calling navigator.clipboard.writeText inside them throws NotAllowedError.
+    const handleUserGesture = async () => {
+      if (!this.hasActiveSecret) return;
       if (this.pendingImmediateClear || (this.targetTime > 0 && Date.now() >= this.targetTime)) {
-        await this.clearNow();
+        await this.clearNow(false);
       }
     };
 
-    window.addEventListener("focus", handleRefocus);
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) {
-        handleRefocus();
+    window.addEventListener("pointerdown", handleUserGesture, { capture: true });
+    window.addEventListener("keydown", handleUserGesture, { capture: true });
+
+    // Best-effort silent clear on page exit (never show error banner on unload)
+    window.addEventListener("pagehide", () => {
+      if (this.hasActiveSecret) {
+        this.clearNow(true);
       }
     });
-    window.addEventListener("pointerdown", handleRefocus, { capture: true });
-    window.addEventListener("keydown", handleRefocus, { capture: true });
-
-    // Best-effort clear on page exit
-    window.addEventListener("pagehide", () => this.clearNow());
-    window.addEventListener("beforeunload", () => this.clearNow());
   },
 
   scheduleClear(durationMs = 180000, reason = "copied") {
     this.cancelPendingTimer();
+    this.hasActiveSecret = true;
     this.activeReason = reason;
     this.targetTime = Date.now() + durationMs;
     this.pendingImmediateClear = false;
 
     // Tick every 500ms to update visible countdown
     this.updateInterval = setInterval(() => {
+      if (!this.hasActiveSecret) {
+        this.cancelPendingTimer();
+        return;
+      }
       const remainingMs = Math.max(0, this.targetTime - Date.now());
       if (this.onTickCallback) {
         this.onTickCallback(remainingMs, this.activeReason, this.pendingImmediateClear);
       }
       if (remainingMs <= 0) {
-        this.clearNow();
+        this.clearNow(false);
       }
     }, 500);
 
     // Initial immediate tick
     if (this.onTickCallback) {
-      this.onTickCallback(durationMs, this.activeReason, this.pendingImmediateClear);
+      this.onTickCallback(durationMs, this.activeReason, false);
     }
   },
 
@@ -69,13 +75,20 @@ export const ClipboardGuard = {
       this.updateInterval = null;
     }
     this.targetTime = 0;
+    this.hasActiveSecret = false;
+    this.pendingImmediateClear = false;
     this.activeReason = null;
-    if (this.onTickCallback && !this.pendingImmediateClear) {
+    if (this.onTickCallback) {
       this.onTickCallback(0, null, false);
     }
   },
 
-  async clearNow() {
+  async clearNow(silentIfBlocked = false) {
+    // If no secret was ever placed in the clipboard by this session, do nothing
+    if (!this.hasActiveSecret && !this.pendingImmediateClear && this.targetTime === 0) {
+      return;
+    }
+
     if (this.clearTimer) {
       clearTimeout(this.clearTimer);
       this.clearTimer = null;
@@ -100,18 +113,24 @@ export const ClipboardGuard = {
         success = true;
       }
     } catch (err) {
-      // Browser rejected background clipboard write (e.g. tab not focused)
+      if (silentIfBlocked) {
+        this.hasActiveSecret = false;
+        this.pendingImmediateClear = false;
+        this.activeReason = null;
+        return;
+      }
+      // Browser rejected background clipboard write (e.g. timer expired while tab was unfocused)
       this.pendingImmediateClear = true;
-      document.title = "[!] Focus tab to clear clipboard - Key Manager";
       if (this.onTickCallback) {
         this.onTickCallback(0, this.activeReason, true);
       }
+      return;
     }
 
     if (success) {
+      this.hasActiveSecret = false;
       this.pendingImmediateClear = false;
       this.activeReason = null;
-      document.title = "Passkey Web Key Manager";
       if (this.onClearCallback) {
         this.onClearCallback();
       }

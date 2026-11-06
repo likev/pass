@@ -5,10 +5,24 @@
 import { CryptoUtils } from "./crypto.js";
 
 export const WebAuthnHelper = {
+  // Safely convert Uint8Array or ArrayBuffer to an exact-bounds ArrayBuffer
+  toArrayBuffer(bytesOrBuffer) {
+    if (bytesOrBuffer instanceof ArrayBuffer) {
+      return bytesOrBuffer;
+    }
+    if (ArrayBuffer.isView(bytesOrBuffer)) {
+      return bytesOrBuffer.buffer.slice(
+        bytesOrBuffer.byteOffset,
+        bytesOrBuffer.byteOffset + bytesOrBuffer.byteLength
+      );
+    }
+    return bytesOrBuffer;
+  },
+
   // Decode base64url string to ArrayBuffer for WebAuthn APIs
   base64ToArrayBuffer(base64Url) {
     const bytes = CryptoUtils.base64ToBytes(base64Url);
-    return bytes.buffer;
+    return this.toArrayBuffer(bytes);
   },
 
   // Encode ArrayBuffer to base64url string
@@ -24,7 +38,10 @@ export const WebAuthnHelper = {
       options.challenge = this.base64ToArrayBuffer(options.challenge);
     }
     if (options.user && options.user.id) {
-      options.user.id = this.base64ToArrayBuffer(options.user.id);
+      options.user = {
+        ...options.user,
+        id: this.base64ToArrayBuffer(options.user.id),
+      };
     }
     if (options.excludeCredentials) {
       options.excludeCredentials = options.excludeCredentials.map((c) => ({
@@ -39,7 +56,7 @@ export const WebAuthnHelper = {
         ...(options.extensions || {}),
         prf: {
           eval: {
-            first: prfSaltBytes.buffer || prfSaltBytes,
+            first: this.toArrayBuffer(prfSaltBytes),
           },
         },
       };
@@ -85,7 +102,7 @@ export const WebAuthnHelper = {
         ...(options.extensions || {}),
         prf: {
           eval: {
-            first: prfSaltBytes.buffer || prfSaltBytes,
+            first: this.toArrayBuffer(prfSaltBytes),
           },
         },
       };

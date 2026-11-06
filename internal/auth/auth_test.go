@@ -114,11 +114,45 @@ func TestDeviceVerificationStateMachine(t *testing.T) {
 		t.Fatalf("CreateCredential failed: %v", err)
 	}
 
-	// Revoke secondary device using simulated step-up
+	// Create sessions for both credentials before revoking cred2
+	sess1, _ := sm.CreateSession(userID, cred1ID)
+	sess2, _ := sm.CreateSession(userID, cred2ID)
+
+	// Verify cross-user step-up token cannot be used to revoke Bob's device
+	otherUserID := uuid.NewString()
+	_ = database.CreateUser(ctx, otherUserID, "mallory", "Mallory")
+	malloryCredID := []byte("mallory-cred")
+	_ = database.CreateCredential(ctx, &db.Credential{
+		ID:              malloryCredID,
+		UserID:          otherUserID,
+		DeviceName:      "Mallory Phone",
+		PublicKey:       []byte("pubkey-m"),
+		AttestationType: "none",
+		AAGUID:          make([]byte, 16),
+		PRFSalt:         make([]byte, 32),
+		WrappedMEK:      []byte("wrapped-mek-m"),
+		WrappedMEKIV:    make([]byte, 12),
+		Status:          "verified",
+	})
+	crossUserStepUpID := "step-up-cross-user"
+	authSvc.AddTestStepUpSession(crossUserStepUpID, otherUserID, malloryCredID)
+	if err := devMgr.RevokeDevice(ctx, userID, cred2ID, crossUserStepUpID, nil); err == nil {
+		t.Fatalf("Expected cross-user step-up token to be rejected in RevokeDevice")
+	}
+
+	// Revoke secondary device using Bob's own simulated step-up
 	stepUpID := "step-up-revoke-test"
 	authSvc.AddTestStepUpSession(stepUpID, userID, cred1ID)
 	if err := devMgr.RevokeDevice(ctx, userID, cred2ID, stepUpID, nil); err != nil {
 		t.Fatalf("RevokeDevice failed when 2 devices exist: %v", err)
+	}
+
+	// Verify cred2's active session was invalidated immediately while cred1's session remains active
+	if _, err := sm.GetSession(sess2.ID); err != ErrSessionNotFound {
+		t.Fatalf("Expected revoked device session to be invalidated, got err=%v", err)
+	}
+	if _, err := sm.GetSession(sess1.ID); err != nil {
+		t.Fatalf("Expected primary device session to remain valid, got err=%v", err)
 	}
 
 	c2, _ := database.GetCredentialByID(ctx, cred2ID)

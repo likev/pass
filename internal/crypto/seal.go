@@ -91,6 +91,44 @@ func unlockMemory(b []byte) {
 	_ = unix.Munlock(b)
 }
 
+func writeAtomicKeyFile(filePath string, payload []byte) error {
+	if dir := filepath.Dir(filePath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+	}
+	tmpFile := filePath + ".tmp"
+	_ = os.Remove(tmpFile)
+	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	return nil
+}
+
 // InitSMK generates a new random SMK, seals it with passphrase, and stores it in s.filePath.
 func (s *SealManager) InitSMK(passphrase string) error {
 	s.mu.Lock()
@@ -149,21 +187,10 @@ func (s *SealManager) InitSMK(passphrase string) error {
 	payload = append(payload, iv...)
 	payload = append(payload, ciphertext...)
 
-	// Ensure directory exists
-	if dir := filepath.Dir(s.filePath); dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0700)
-	}
-
-	// Write atomically with chmod 0600
-	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, payload, 0600); err != nil {
+	// Write atomically with chmod 0600 and fsync
+	if err := writeAtomicKeyFile(s.filePath, payload); err != nil {
 		clear(newSMK)
 		return fmt.Errorf("failed to write sealed key file: %w", err)
-	}
-	if err := os.Rename(tmpFile, s.filePath); err != nil {
-		_ = os.Remove(tmpFile)
-		clear(newSMK)
-		return fmt.Errorf("failed to commit sealed key file: %w", err)
 	}
 
 	lockMemory(newSMK)
@@ -319,20 +346,15 @@ func (s *SealManager) RotatePassphrase(oldPassphrase, newPassphrase string) erro
 	payload = append(payload, newIV...)
 	payload = append(payload, newCiphertext...)
 
-	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, payload, 0600); err != nil {
+	if err := writeAtomicKeyFile(s.filePath, payload); err != nil {
 		return fmt.Errorf("failed to write rotated key file: %w", err)
-	}
-	if err := os.Rename(tmpFile, s.filePath); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to commit rotated key file: %w", err)
 	}
 
 	// Update in-memory SMK if already unsealed
 	if s.unsealed {
 		if len(s.smk) == smkLen {
-			unlockMemory(s.smk)
 			clear(s.smk)
+			unlockMemory(s.smk)
 		}
 		newSMKCopy := make([]byte, smkLen)
 		copy(newSMKCopy, rawSMK)

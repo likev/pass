@@ -2,6 +2,7 @@ package keys
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,9 +16,10 @@ import (
 )
 
 const (
-	MaxKeySizeBytes = 10 * 1024 // 10KB (10,240 bytes)
-	MaxKeysPerUser  = 1000
-	MaxKeysPerIP    = 10000
+	MaxKeySizeBytes  = 10 * 1024 // 10KB (10,240 bytes)
+	MaxKeyNameLength = 256
+	MaxKeysPerUser   = 1000
+	MaxKeysPerIP     = 10000
 )
 
 var (
@@ -73,9 +75,15 @@ type CreateKeyPayload struct {
 
 // CreateKey saves a new key encrypted with Server-DEK
 func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *CreateKeyPayload, ipAddr string) (*db.KeyMetadata, error) {
+	if payload == nil {
+		return nil, ErrInvalidKeyData
+	}
 	name := strings.TrimSpace(payload.Name)
 	if name == "" {
 		return nil, errors.New("key name is required")
+	}
+	if len(name) > MaxKeyNameLength {
+		return nil, errors.New("key name exceeds 256 characters")
 	}
 	nameNorm := strings.ToLower(name)
 
@@ -199,10 +207,13 @@ func (ks *KeyService) RetrieveSingleKey(
 	assertionBytes []byte,
 	ipAddr string,
 ) (*SingleKeyPayload, error) {
-	// 1. Verify Passkey assertion
+	// 1. Verify Passkey assertion and ensure it belongs to the authenticated user
 	verifiedCred, err := ks.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes)
 	if err != nil {
 		return nil, fmt.Errorf("passkey step-up verification failed: %w", err)
+	}
+	if verifiedCred.UserID != userID {
+		return nil, fmt.Errorf("passkey step-up verification failed: %w", auth.ErrInvalidCredential)
 	}
 
 	// 2. Fetch the single key
@@ -232,7 +243,7 @@ func (ks *KeyService) RetrieveSingleKey(
 	activeCred := verifiedCred
 	if len(activeCred.WrappedMEK) == 0 {
 		c, err := ks.db.GetCredentialByID(ctx, credID)
-		if err == nil && c != nil {
+		if err == nil && c != nil && c.UserID == userID && c.Status == "verified" {
 			activeCred = c
 		}
 	}
@@ -271,8 +282,17 @@ func (ks *KeyService) UpdateKey(
 		return ErrInvalidKeyData
 	}
 
-	if _, err := ks.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes); err != nil {
+	name = strings.TrimSpace(name)
+	if len(name) > MaxKeyNameLength {
+		return ErrInvalidKeyData
+	}
+
+	verifiedCred, err := ks.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes)
+	if err != nil {
 		return fmt.Errorf("passkey step-up verification failed: %w", err)
+	}
+	if verifiedCred.UserID != userID {
+		return fmt.Errorf("passkey step-up verification failed: %w", auth.ErrInvalidCredential)
 	}
 
 	existing, err := ks.db.GetKeyByID(ctx, keyID, userID)
@@ -302,6 +322,12 @@ func (ks *KeyService) UpdateKey(
 	}
 
 	if err := ks.db.UpdateKey(ctx, keyID, userID, name, nameNorm, sCT, sIV, sSalt, clientIV, clientSalt); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return ErrDuplicateKey
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrKeyNotFound
+		}
 		return fmt.Errorf("failed to update key: %w", err)
 	}
 
@@ -318,8 +344,12 @@ func (ks *KeyService) DeleteKey(
 	assertionBytes []byte,
 	ipAddr string,
 ) error {
-	if _, err := ks.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes); err != nil {
+	verifiedCred, err := ks.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes)
+	if err != nil {
 		return fmt.Errorf("passkey step-up verification failed: %w", err)
+	}
+	if verifiedCred.UserID != userID {
+		return fmt.Errorf("passkey step-up verification failed: %w", auth.ErrInvalidCredential)
 	}
 
 	existing, err := ks.db.GetKeyByID(ctx, keyID, userID)
@@ -328,6 +358,9 @@ func (ks *KeyService) DeleteKey(
 	}
 
 	if err := ks.db.DeleteKey(ctx, keyID, userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrKeyNotFound
+		}
 		return fmt.Errorf("failed to delete key: %w", err)
 	}
 

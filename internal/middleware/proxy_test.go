@@ -358,4 +358,22 @@ func TestGetIPProxyHeaders(t *testing.T) {
 	if ip := GetIP(req4); ip != "192.0.2.1" {
 		t.Fatalf("expected RemoteAddr 192.0.2.1, got %s", ip)
 	}
+
+	// Case 5: Non-IP spoofed header values are ignored and fall back to valid IP
+	req5 := httptest.NewRequest("GET", "/", nil)
+	req5.Header.Set("CF-Connecting-IP", "not-an-ip")
+	req5.Header.Set("X-Real-IP", "also-invalid-ip")
+	req5.Header.Set("X-Forwarded-For", "spoofed-string, 2001:0db8:0000:0000:0000:0000:0000:0001")
+	req5.RemoteAddr = "127.0.0.1:50000"
+	if ip := GetIP(req5); ip != "2001:db8::1" {
+		t.Fatalf("expected canonicalized IPv6 2001:db8::1 after skipping non-IP headers, got %s", ip)
+	}
+
+	// Case 6: Malformed X-Forwarded-Host is ignored
+	req6 := httptest.NewRequest("GET", "http://localhost:8082/", nil)
+	req6.Header.Set("X-Forwarded-Host", "evil.example.com/injected-path")
+	req6.Host = "vault.example.com"
+	if host := GetRequestHost(req6); host != "vault.example.com" {
+		t.Fatalf("expected malformed X-Forwarded-Host to be ignored in favor of Host, got %s", host)
+	}
 }

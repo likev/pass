@@ -242,3 +242,65 @@ func TestDBLifecycle(t *testing.T) {
 		t.Fatalf("expected SQLite trigger to reject 1001st key, got err: %v", err)
 	}
 }
+
+func TestLikeWildcardEscapingAndAtomicUserTx(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "passmgr-like-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	database, err := Open(filepath.Join(tempDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	userID := uuid.NewString()
+	cred := &Credential{
+		ID:              []byte("atomic-cred-1"),
+		UserID:          userID,
+		DeviceName:      "Initial Phone",
+		PublicKey:       []byte("pk"),
+		AttestationType: "none",
+		PRFSalt:         make([]byte, 32),
+		WrappedMEK:      []byte("wmek"),
+		WrappedMEKIV:    make([]byte, 12),
+		Status:          "verified",
+	}
+
+	if err := database.CreateUserWithCredentialTx(ctx, userID, "atomic_user", "Atomic User", cred, "127.0.0.1", "registered"); err != nil {
+		t.Fatalf("CreateUserWithCredentialTx failed: %v", err)
+	}
+
+	for _, name := range []string{"alpha_one", "alphaXone", "100%ers", "1000ers"} {
+		err := database.CreateKey(ctx, &Key{
+			ID:               uuid.NewString(),
+			UserID:           userID,
+			Name:             name,
+			NameNormalized:   strings.ToLower(name),
+			ServerCiphertext: []byte("ct"),
+			ServerIV:         make([]byte, 12),
+			ServerSalt:       make([]byte, 32),
+			ClientIV:         make([]byte, 12),
+			ClientSalt:       make([]byte, 32),
+			CreatorIP:        "127.0.0.1",
+		})
+		if err != nil {
+			t.Fatalf("CreateKey(%s) failed: %v", name, err)
+		}
+	}
+
+	// Searching for literal "_" should only match "alpha_one", not "alphaXone"
+	underscoreMatches, err := database.ListKeysMetadata(ctx, userID, "alpha_one")
+	if err != nil || len(underscoreMatches) != 1 || underscoreMatches[0].Name != "alpha_one" {
+		t.Fatalf("expected literal underscore match only, got %+v (err=%v)", underscoreMatches, err)
+	}
+
+	// Searching for literal "%" should only match "100%ers", not all keys or "1000ers"
+	percentMatches, err := database.ListKeysMetadata(ctx, userID, "%")
+	if err != nil || len(percentMatches) != 1 || percentMatches[0].Name != "100%ers" {
+		t.Fatalf("expected literal percent match only, got %+v (err=%v)", percentMatches, err)
+	}
+}

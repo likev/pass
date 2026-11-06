@@ -5,6 +5,7 @@
 import { CryptoUtils } from "./crypto.js";
 import { WebAuthnHelper } from "./webauthn.js";
 import { ClipboardGuard } from "./clipboard.js";
+import { I18n } from "./i18n.js";
 
 // Key size limit: 10KB (10,240 bytes)
 const MAX_KEY_SIZE_BYTES = 10 * 1024;
@@ -21,6 +22,11 @@ const state = {
   pendingNewPhoneCode: null,
   pendingNewPhoneRequestId: null,
   phonePollTimer: null,
+  approverPollTimer: null,
+  selectedPairAction: "add_phone",
+  cachedKeys: [],
+  cachedDevices: [],
+  cachedPendingRequests: [],
 };
 
 // UI Elements
@@ -30,9 +36,13 @@ const els = {
   clipboardProgressBar: document.getElementById("clipboard-progress-bar"),
   btnClearClipboard: document.getElementById("btn-clear-clipboard"),
 
+  btnLangEn: document.getElementById("btn-lang-en"),
+  btnLangZh: document.getElementById("btn-lang-zh"),
+
   viewUnseal: document.getElementById("view-unseal"),
   viewAuth: document.getElementById("view-auth"),
   viewDashboard: document.getElementById("view-dashboard"),
+  headerUserActions: document.getElementById("header-user-actions"),
 
   // Unseal
   unsealTitle: document.getElementById("unseal-title"),
@@ -51,11 +61,16 @@ const els = {
   btnRegister: document.getElementById("btn-register"),
   loginUsername: document.getElementById("login-username"),
   btnLogin: document.getElementById("btn-login"),
+  btnAuthPairPhone: document.getElementById("btn-auth-pair-phone"),
 
-  // Dashboard
+  // Dashboard & Single-Device Warning
   userDisplayName: document.getElementById("user-display-name"),
+  devicesCountBadge: document.getElementById("devices-count-badge"),
   btnLogout: document.getElementById("btn-logout"),
+  singleDeviceWarning: document.getElementById("single-device-warning"),
+  btnWarningAddDevice: document.getElementById("btn-warning-add-device"),
   keysFilter: document.getElementById("keys-filter"),
+  keysCountBadge: document.getElementById("keys-count-badge"),
   keysList: document.getElementById("keys-list"),
   keysAlert: document.getElementById("keys-alert"),
 
@@ -84,7 +99,16 @@ const els = {
   // Devices View
   btnOpenDevices: document.getElementById("btn-open-devices"),
   modalDevices: document.getElementById("modal-devices"),
+  modalDevicesTitle: document.getElementById("modal-devices-title"),
+  modalDevicesSubtitle: document.getElementById("modal-devices-subtitle"),
   btnCloseDevices: document.getElementById("btn-close-devices"),
+  unauthNewDeviceView: document.getElementById("unauth-new-device-view"),
+  verifiedDeviceView: document.getElementById("verified-device-view"),
+  modalSingleDeviceTip: document.getElementById("modal-single-device-tip"),
+  pairUsername: document.getElementById("pair-username"),
+  pairDeviceName: document.getElementById("pair-device-name"),
+  btnStartPairing: document.getElementById("btn-start-pairing"),
+  btnRefreshRequests: document.getElementById("btn-refresh-requests"),
   devicesList: document.getElementById("devices-list"),
   pendingRequestsList: document.getElementById("pending-requests-list"),
   btnAddPhone: document.getElementById("btn-add-phone"),
@@ -95,12 +119,47 @@ const els = {
   devicesAlert: document.getElementById("devices-alert"),
 };
 
-// Initialize Clipboard Guard
+// ===================== Language Switcher & i18n Init =====================
+
+function syncLangButtons() {
+  if (els.btnLangEn) {
+    els.btnLangEn.classList.toggle("active", I18n.lang === "en");
+  }
+  if (els.btnLangZh) {
+    els.btnLangZh.classList.toggle("active", I18n.lang === "zh");
+  }
+}
+
+if (els.btnLangEn) {
+  els.btnLangEn.addEventListener("click", () => I18n.setLang("en"));
+}
+if (els.btnLangZh) {
+  els.btnLangZh.addEventListener("click", () => I18n.setLang("zh"));
+}
+
+I18n.onChange(() => {
+  syncLangButtons();
+  updateUnsealCopy();
+  updatePasteBadgeCopy();
+  updateDevicesModalHeaderCopy();
+  if (state.currentUser) {
+    renderKeys(state.cachedKeys);
+    renderDevices(state.cachedDevices);
+    renderPendingRequests(state.cachedPendingRequests);
+  }
+});
+
+// Apply initial detected language immediately
+I18n.applyDOMTranslations();
+syncLangButtons();
+
+// ===================== Clipboard Auto-Clear Guard =====================
+
 ClipboardGuard.init(
   (remainingMs, reason, pendingClear) => {
     if (pendingClear) {
       els.bannerClipboard.style.display = "flex";
-      els.clipboardText.textContent = "⚠️ Background clipboard wipe pending — focus tab or click to clear!";
+      els.clipboardText.textContent = I18n.t("clipboardPendingWipe");
       els.clipboardProgressBar.style.width = "100%";
       return;
     }
@@ -113,14 +172,20 @@ ClipboardGuard.init(
     const mins = Math.floor(totalSec / 60);
     const secs = totalSec % 60;
     const timeStr = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-    const actionLabel = reason === "pasted" ? "Pasted secret in clipboard" : "Decrypted key in clipboard";
-    els.clipboardText.textContent = `${actionLabel} — auto-clearing in ${timeStr}`;
+    const actionLabel =
+      reason === "pasted"
+        ? I18n.t("clipboardPastedLabel")
+        : I18n.t("clipboardCopiedLabel");
+    els.clipboardText.textContent = I18n.t("clipboardCountdown", {
+      label: actionLabel,
+      time: timeStr,
+    });
     const percent = ((180000 - remainingMs) / 180000) * 100;
     els.clipboardProgressBar.style.width = `${percent}%`;
   },
   () => {
     els.bannerClipboard.style.display = "none";
-    showAlert(els.keysAlert, "Clipboard securely auto-cleared.", "info");
+    showAlert(els.keysAlert, I18n.t("clipboardAutoCleared"), "info");
   }
 );
 
@@ -172,11 +237,11 @@ async function getOrDerivePasskeyKek(credential, prfSaltBytes, isCreation = fals
             allowCredentials: [{ id: credential.rawId, type: "public-key" }],
             userVerification: "preferred",
             timeout: 60000,
-          },
-          extensions: {
-            prf: {
-              eval: {
-                first: prfSaltBytes.buffer || prfSaltBytes,
+            extensions: {
+              prf: {
+                eval: {
+                  first: WebAuthnHelper.toArrayBuffer(prfSaltBytes),
+                },
               },
             },
           },
@@ -200,7 +265,23 @@ async function getOrDerivePasskeyKek(credential, prfSaltBytes, isCreation = fals
   return CryptoUtils.derivePasskeyKek(new Uint8Array(credential.rawId), prfSaltBytes);
 }
 
-// Check Server Seal Status
+// ===================== Server Seal Status =====================
+
+function updateUnsealCopy() {
+  if (!state.sealed) return;
+  if (!state.initialized) {
+    els.unsealTitle.textContent = I18n.t("unsealInitTitle");
+    els.unsealDesc.textContent = I18n.t("unsealInitDesc");
+    els.unsealPassConfirmRow.style.display = "block";
+    els.btnUnsealSubmit.textContent = I18n.t("unsealInitBtn");
+  } else {
+    els.unsealTitle.textContent = I18n.t("unsealSealedTitle");
+    els.unsealDesc.textContent = I18n.t("unsealSealedDesc");
+    els.unsealPassConfirmRow.style.display = "none";
+    els.btnUnsealSubmit.textContent = I18n.t("unsealSealedBtn");
+  }
+}
+
 async function checkSealStatus() {
   try {
     const res = await fetch("/api/v1/admin/seal-status", { cache: "no-store" });
@@ -210,34 +291,21 @@ async function checkSealStatus() {
 
     if (state.sealed) {
       showView("unseal");
-      if (!state.initialized) {
-        els.unsealTitle.textContent = "First-Time Server Initialization";
-        els.unsealDesc.textContent =
-          "Please set a strong Admin Startup Passphrase (min 12 chars). This will seal the Server Master Key (SMK) via Argon2id + AES-256-GCM.";
-        els.unsealPassConfirmRow.style.display = "block";
-        els.btnUnsealSubmit.textContent = "Initialize & Unseal Server";
-      } else {
-        els.unsealTitle.textContent = "Server Sealed";
-        els.unsealDesc.textContent =
-          "Enter your Admin Startup Passphrase to unseal the Server Master Key into RAM.";
-        els.unsealPassConfirmRow.style.display = "none";
-        els.btnUnsealSubmit.textContent = "Unseal Server";
-      }
+      updateUnsealCopy();
     } else {
       await checkAuthStatus();
     }
   } catch (err) {
     showView("unseal");
-    showAlert(els.unsealAlert, "Failed to connect to backend server: " + err.message);
+    showAlert(els.unsealAlert, I18n.t("unsealConnectError", { err: err.message }));
   }
 }
 
-// Unseal Form Submission
 els.btnUnsealSubmit.addEventListener("click", async () => {
   hideAlert(els.unsealAlert);
   const pass = els.unsealPass.value;
   if (pass.length < 12) {
-    showAlert(els.unsealAlert, "Passphrase must be at least 12 characters.");
+    showAlert(els.unsealAlert, I18n.t("unsealMinLenError"));
     return;
   }
 
@@ -245,7 +313,7 @@ els.btnUnsealSubmit.addEventListener("click", async () => {
   if (!state.initialized) {
     const confirm = els.unsealPassConfirm.value;
     if (pass !== confirm) {
-      showAlert(els.unsealAlert, "Passphrases do not match.");
+      showAlert(els.unsealAlert, I18n.t("unsealMismatchError"));
       return;
     }
     payload.confirm_passphrase = confirm;
@@ -273,18 +341,23 @@ els.btnUnsealSubmit.addEventListener("click", async () => {
   }
 });
 
-// Check Authentication Status
+// ===================== Auth & Dashboard Entry =====================
+
+async function enterDashboard(user) {
+  state.currentUser = user;
+  showView("dashboard");
+  els.userDisplayName.textContent = user.display_name || user.username;
+  await Promise.all([loadKeys(), checkDeviceSafety()]);
+}
+
 async function checkAuthStatus() {
   try {
     const res = await apiFetch("/api/v1/auth/me");
     if (res.ok) {
       const data = await res.json();
-      state.currentUser = data.user;
       state.activeCredId = data.credential_id;
       state.csrfToken = data.csrf_token;
-      showView("dashboard");
-      els.userDisplayName.textContent = data.user.display_name || data.user.username;
-      loadKeys();
+      await enterDashboard(data.user);
     } else {
       showView("auth");
     }
@@ -297,6 +370,45 @@ function showView(view) {
   els.viewUnseal.style.display = view === "unseal" ? "block" : "none";
   els.viewAuth.style.display = view === "auth" ? "block" : "none";
   els.viewDashboard.style.display = view === "dashboard" ? "block" : "none";
+  if (els.headerUserActions) {
+    els.headerUserActions.style.display = view === "dashboard" ? "flex" : "none";
+  }
+}
+
+// Check how many verified devices the user has; warn if <= 1
+async function checkDeviceSafety() {
+  if (!state.currentUser) return;
+  try {
+    const res = await apiFetch("/api/v1/devices");
+    if (!res.ok) return;
+    const data = await res.json();
+    const devices = data.devices || [];
+    state.cachedDevices = devices;
+    updateSingleDeviceWarning(devices);
+  } catch (_) {}
+}
+
+function updateSingleDeviceWarning(devices) {
+  const verifiedCount = (devices || []).filter((d) => d.status === "verified").length;
+  const isSingleDevice = verifiedCount <= 1;
+
+  if (els.singleDeviceWarning) {
+    els.singleDeviceWarning.style.display = isSingleDevice ? "flex" : "none";
+  }
+  if (els.modalSingleDeviceTip) {
+    els.modalSingleDeviceTip.style.display = state.currentUser && isSingleDevice ? "flex" : "none";
+  }
+  if (els.devicesCountBadge) {
+    els.devicesCountBadge.style.display = verifiedCount > 0 ? "inline-block" : "none";
+    els.devicesCountBadge.textContent = String(verifiedCount);
+    els.devicesCountBadge.classList.toggle("count-warning", isSingleDevice);
+  }
+}
+
+if (els.btnWarningAddDevice) {
+  els.btnWarningAddDevice.addEventListener("click", () => {
+    openDevicesModal();
+  });
 }
 
 // ===================== Passkey Registration & Login =====================
@@ -305,10 +417,10 @@ els.btnRegister.addEventListener("click", async () => {
   hideAlert(els.authAlert);
   const username = els.regUsername.value.trim();
   const displayName = els.regDisplayName.value.trim() || username;
-  const deviceName = els.regDeviceName.value.trim() || "My Device";
+  const deviceName = els.regDeviceName.value.trim() || I18n.t("defaultDeviceName");
 
   if (!username) {
-    showAlert(els.authAlert, "Username is required for registration.");
+    showAlert(els.authAlert, I18n.t("regUsernameRequired"));
     return;
   }
 
@@ -356,18 +468,22 @@ els.btnRegister.addEventListener("click", async () => {
     if (!finishRes.ok) throw new Error(finishData.message || finishData.error);
 
     state.csrfToken = finishData.csrf_token;
-    state.currentUser = finishData.user;
-    showView("dashboard");
-    els.userDisplayName.textContent = finishData.user.display_name;
-    loadKeys();
+    state.activeCredId =
+      finishData.credential_id || WebAuthnHelper.arrayBufferToBase64(credential.rawId);
+    await enterDashboard(finishData.user);
   } catch (err) {
-    showAlert(els.authAlert, "Registration failed: " + err.message);
+    showAlert(els.authAlert, I18n.t("regFailed", { err: err.message }));
   }
 });
 
 els.btnLogin.addEventListener("click", async () => {
   hideAlert(els.authAlert);
   const username = els.loginUsername.value.trim();
+  if (!username) {
+    showAlert(els.authAlert, I18n.t("loginUsernameRequired"));
+    els.loginUsername.focus();
+    return;
+  }
 
   try {
     const beginRes = await fetch("/api/v1/auth/login/begin", {
@@ -404,12 +520,11 @@ els.btnLogin.addEventListener("click", async () => {
     if (!finishRes.ok) throw new Error(finishData.message || finishData.error);
 
     state.csrfToken = finishData.csrf_token;
-    state.currentUser = finishData.user;
-    showView("dashboard");
-    els.userDisplayName.textContent = finishData.user.display_name;
-    loadKeys();
+    state.activeCredId =
+      finishData.credential_id || WebAuthnHelper.arrayBufferToBase64(assertion.rawId);
+    await enterDashboard(finishData.user);
   } catch (err) {
-    showAlert(els.authAlert, "Login failed: " + err.message);
+    showAlert(els.authAlert, I18n.t("loginFailed", { err: err.message }));
   }
 });
 
@@ -417,7 +532,11 @@ els.btnLogout.addEventListener("click", async () => {
   await apiFetch("/api/v1/auth/logout", { method: "POST" });
   await ClipboardGuard.clearNow();
   state.currentUser = null;
+  state.activeCredId = null;
   state.csrfToken = null;
+  state.cachedKeys = [];
+  state.cachedDevices = [];
+  state.cachedPendingRequests = [];
   showView("auth");
 });
 
@@ -436,19 +555,27 @@ async function loadKeys(query = "") {
     const res = await apiFetch(`/api/v1/keys?q=${encodeURIComponent(query)}`);
     if (!res.ok) return;
     const data = await res.json();
-    renderKeys(data.keys || []);
+    state.cachedKeys = data.keys || [];
+    renderKeys(state.cachedKeys);
   } catch (err) {
-    showAlert(els.keysAlert, "Failed to load keys: " + err.message);
+    showAlert(els.keysAlert, I18n.t("loadKeysFailed", { err: err.message }));
   }
 }
 
 function renderKeys(keys) {
   els.keysList.innerHTML = "";
+  if (els.keysCountBadge) {
+    els.keysCountBadge.textContent = String(keys.length);
+  }
   if (keys.length === 0) {
-    els.keysList.innerHTML = `<li class="empty-list">No keys found. Click "+ Create New Key" to store your first key.</li>`;
+    const emptyLi = document.createElement("li");
+    emptyLi.className = "empty-list";
+    emptyLi.textContent = I18n.t("emptyKeysList");
+    els.keysList.appendChild(emptyLi);
     return;
   }
 
+  const locale = I18n.lang === "zh" ? "zh-CN" : "en-US";
   for (const k of keys) {
     const li = document.createElement("li");
     li.className = "key-item";
@@ -462,7 +589,9 @@ function renderKeys(keys) {
 
     const date = document.createElement("span");
     date.className = "key-date";
-    date.textContent = `Updated: ${new Date(k.updated_at).toLocaleString()}`;
+    date.textContent = I18n.t("keyUpdatedPrefix", {
+      date: new Date(k.updated_at).toLocaleString(locale),
+    });
 
     info.appendChild(name);
     info.appendChild(date);
@@ -472,12 +601,12 @@ function renderKeys(keys) {
 
     const btnCopy = document.createElement("button");
     btnCopy.className = "btn btn-primary btn-sm";
-    btnCopy.textContent = "Copy Key";
+    btnCopy.textContent = I18n.t("btnCopyKey");
     btnCopy.addEventListener("click", () => copySingleKey(k.id, k.name));
 
     const btnDelete = document.createElement("button");
     btnDelete.className = "btn btn-danger btn-sm";
-    btnDelete.textContent = "Delete";
+    btnDelete.textContent = I18n.t("btnDeleteKey");
     btnDelete.addEventListener("click", () => deleteKey(k.id, k.name));
 
     actions.appendChild(btnCopy);
@@ -553,14 +682,14 @@ async function copySingleKey(keyId, keyName) {
     })();
 
     await ClipboardGuard.writeViaPromise(keyBlobPromise, "copied");
-    showAlert(els.keysAlert, `Key "${keyName}" decrypted directly to clipboard! (Auto-clears in 3 minutes)`, "success");
+    showAlert(els.keysAlert, I18n.t("keyCopiedAlert", { name: keyName }), "success");
   } catch (err) {
-    showAlert(els.keysAlert, "Failed to retrieve/decrypt key: " + err.message);
+    showAlert(els.keysAlert, I18n.t("keyCopyFailed", { err: err.message }));
   }
 }
 
 async function deleteKey(keyId, keyName) {
-  if (!confirm(`Are you sure you want to delete "${keyName}"? Passkey verification required.`)) {
+  if (!confirm(I18n.t("confirmDeleteKey", { name: keyName }))) {
     return;
   }
   try {
@@ -585,10 +714,10 @@ async function deleteKey(keyId, keyName) {
       const errData = await delRes.json();
       throw new Error(errData.message || errData.error);
     }
-    showAlert(els.keysAlert, `Key "${keyName}" deleted.`, "info");
+    showAlert(els.keysAlert, I18n.t("keyDeletedAlert", { name: keyName }), "info");
     loadKeys(els.keysFilter.value);
   } catch (err) {
-    showAlert(els.keysAlert, "Delete failed: " + err.message);
+    showAlert(els.keysAlert, I18n.t("keyDeleteFailed", { err: err.message }));
   }
 }
 
@@ -606,6 +735,19 @@ els.btnCloseCreateKey.addEventListener("click", () => {
   els.modalCreateKey.style.display = "none";
 });
 
+function updatePasteBadgeCopy() {
+  if (!els.pasteStatusBadge) return;
+  if (state.pendingPastedBytes && state.pendingPastedBytes.length > 0) {
+    els.pasteStatusBadge.textContent = I18n.t("pasteStatusCaptured", {
+      bytes: state.pendingPastedBytes.length,
+    });
+    els.pasteStatusBadge.className = "badge badge-success";
+  } else {
+    els.pasteStatusBadge.textContent = I18n.t("pasteStatusEmpty");
+    els.pasteStatusBadge.className = "badge badge-neutral";
+  }
+}
+
 function resetCreateKeyModal() {
   hideAlert(els.createKeyAlert);
   els.keyName.value = "";
@@ -615,8 +757,7 @@ function resetCreateKeyModal() {
     CryptoUtils.zeroBuffer(state.pendingPastedBytes);
     state.pendingPastedBytes = null;
   }
-  els.pasteStatusBadge.textContent = "No pasted key captured yet.";
-  els.pasteStatusBadge.className = "badge badge-neutral";
+  updatePasteBadgeCopy();
   switchMode("type");
 }
 
@@ -639,7 +780,7 @@ els.tabGen.addEventListener("click", () => switchMode("gen"));
 // Block pasting on Confirm Input so user actually types twice
 els.keyTypeConfirm.addEventListener("paste", (e) => {
   e.preventDefault();
-  showAlert(els.createKeyAlert, "Pasting into the confirmation field is disabled. Please type to confirm.");
+  showAlert(els.createKeyAlert, I18n.t("pasteDisabledConfirmAlert"));
 });
 els.keyTypeConfirm.addEventListener("drop", (e) => e.preventDefault());
 
@@ -647,7 +788,7 @@ els.keyTypeConfirm.addEventListener("drop", (e) => e.preventDefault());
 els.keyTypePrimary.addEventListener("input", () => {
   const bytes = new TextEncoder().encode(els.keyTypePrimary.value);
   if (bytes.length > MAX_KEY_SIZE_BYTES) {
-    showAlert(els.createKeyAlert, `Key size exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+    showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
   } else {
     hideAlert(els.createKeyAlert);
   }
@@ -656,7 +797,7 @@ els.keyTypePrimary.addEventListener("input", () => {
 els.keyTypeConfirm.addEventListener("input", () => {
   const bytes = new TextEncoder().encode(els.keyTypeConfirm.value);
   if (bytes.length > MAX_KEY_SIZE_BYTES) {
-    showAlert(els.createKeyAlert, `Key confirmation exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+    showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
   } else {
     const primaryBytes = new TextEncoder().encode(els.keyTypePrimary.value);
     if (primaryBytes.length <= MAX_KEY_SIZE_BYTES) {
@@ -684,17 +825,15 @@ async function capturePasteDirect(text) {
       CryptoUtils.zeroBuffer(state.pendingPastedBytes);
       state.pendingPastedBytes = null;
     }
-    els.pasteStatusBadge.textContent = "No pasted key captured yet.";
-    els.pasteStatusBadge.className = "badge badge-neutral";
-    showAlert(els.createKeyAlert, `Pasted key exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+    updatePasteBadgeCopy();
+    showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
     return;
   }
   if (state.pendingPastedBytes) {
     CryptoUtils.zeroBuffer(state.pendingPastedBytes);
   }
   state.pendingPastedBytes = encoded;
-  els.pasteStatusBadge.textContent = `Pasted secret captured in memory (${state.pendingPastedBytes.length} bytes) — ready to encrypt`;
-  els.pasteStatusBadge.className = "badge badge-success";
+  updatePasteBadgeCopy();
   // Activate 3-minute clear countdown because user pasted from clipboard
   ClipboardGuard.scheduleClear(180 * 1000, "pasted");
 }
@@ -704,7 +843,7 @@ els.btnPasteCapture.addEventListener("click", async () => {
     const text = await navigator.clipboard.readText();
     await capturePasteDirect(text);
   } catch (err) {
-    showAlert(els.createKeyAlert, "Clipboard read permission denied. You can press Ctrl+V / Cmd+V in this window instead.");
+    showAlert(els.createKeyAlert, I18n.t("clipboardReadDeniedAlert"));
   }
 });
 
@@ -725,7 +864,7 @@ els.btnSaveKey.addEventListener("click", async () => {
   hideAlert(els.createKeyAlert);
   const name = els.keyName.value.trim();
   if (!name) {
-    showAlert(els.createKeyAlert, "Please provide a Key Name.");
+    showAlert(els.createKeyAlert, I18n.t("keyNameRequiredAlert"));
     return;
   }
 
@@ -737,7 +876,7 @@ els.btnSaveKey.addEventListener("click", async () => {
       const p1 = els.keyTypePrimary.value;
       const p2 = els.keyTypeConfirm.value;
       if (!p1) {
-        showAlert(els.createKeyAlert, "Please enter the key.");
+        showAlert(els.createKeyAlert, I18n.t("keyEnterRequiredAlert"));
         return;
       }
 
@@ -751,7 +890,7 @@ els.btnSaveKey.addEventListener("click", async () => {
       if (buf1.length > MAX_KEY_SIZE_BYTES || buf2.length > MAX_KEY_SIZE_BYTES) {
         CryptoUtils.zeroBuffer(buf1);
         CryptoUtils.zeroBuffer(buf2);
-        showAlert(els.createKeyAlert, `Key size exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
         return;
       }
 
@@ -760,19 +899,19 @@ els.btnSaveKey.addEventListener("click", async () => {
 
       if (!match) {
         CryptoUtils.zeroBuffer(buf1);
-        showAlert(els.createKeyAlert, "Key confirmation does not match. Please re-enter.");
+        showAlert(els.createKeyAlert, I18n.t("keyMismatchAlert"));
         return;
       }
       plaintextBytes = buf1;
     } else if (activeMode === "paste") {
       if (!state.pendingPastedBytes || state.pendingPastedBytes.length === 0) {
-        showAlert(els.createKeyAlert, "No pasted key captured. Click 'Paste from Clipboard' first.");
+        showAlert(els.createKeyAlert, I18n.t("noPasteCapturedAlert"));
         return;
       }
       if (state.pendingPastedBytes.length > MAX_KEY_SIZE_BYTES) {
         CryptoUtils.zeroBuffer(state.pendingPastedBytes);
         state.pendingPastedBytes = null;
-        showAlert(els.createKeyAlert, `Pasted key exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
         return;
       }
       plaintextBytes = state.pendingPastedBytes;
@@ -781,17 +920,17 @@ els.btnSaveKey.addEventListener("click", async () => {
       const mode = els.genPreset.value;
       const length = parseInt(els.genLength.value, 10);
       if (isNaN(length) || length <= 0) {
-        showAlert(els.createKeyAlert, "Invalid key length.");
+        showAlert(els.createKeyAlert, I18n.t("invalidGenLengthAlert"));
         return;
       }
       if (length > MAX_KEY_SIZE_BYTES) {
-        showAlert(els.createKeyAlert, `Generated key length exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
         return;
       }
       plaintextBytes = CryptoUtils.generateSecureKey(mode, length);
       if (plaintextBytes.length > MAX_KEY_SIZE_BYTES) {
         CryptoUtils.zeroBuffer(plaintextBytes);
-        showAlert(els.createKeyAlert, `Generated key exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
         return;
       }
 
@@ -803,14 +942,14 @@ els.btnSaveKey.addEventListener("click", async () => {
     }
 
     if (!plaintextBytes || plaintextBytes.length === 0) {
-      showAlert(els.createKeyAlert, "Key payload is empty.");
+      showAlert(els.createKeyAlert, I18n.t("emptyPayloadAlert"));
       return;
     }
 
     if (plaintextBytes.length > MAX_KEY_SIZE_BYTES) {
       CryptoUtils.zeroBuffer(plaintextBytes);
       if (genClipboardBytes) CryptoUtils.zeroBuffer(genClipboardBytes);
-      showAlert(els.createKeyAlert, `Key payload exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+      showAlert(els.createKeyAlert, I18n.t("keyExceedsLimitAlert", { max: MAX_KEY_SIZE_BYTES }));
       return;
     }
 
@@ -864,39 +1003,120 @@ els.btnSaveKey.addEventListener("click", async () => {
 
     resetCreateKeyModal();
     els.modalCreateKey.style.display = "none";
-    showAlert(els.keysAlert, `Key "${name}" encrypted and saved!`, "success");
+    showAlert(els.keysAlert, I18n.t("keySavedAlert", { name }), "success");
     loadKeys();
   } catch (err) {
     if (plaintextBytes) CryptoUtils.zeroBuffer(plaintextBytes);
     if (genClipboardBytes) CryptoUtils.zeroBuffer(genClipboardBytes);
-    showAlert(els.createKeyAlert, "Failed to save key: " + err.message);
+    showAlert(els.createKeyAlert, I18n.t("keySaveFailedAlert", { err: err.message }));
   }
 });
 
 // ===================== Devices & Verified-Device Phone Enrollment =====================
 
-els.btnOpenDevices.addEventListener("click", () => {
-  els.modalDevices.style.display = "flex";
-  loadDevicesAndRequests();
-});
+function updateDevicesModalHeaderCopy() {
+  if (!els.modalDevicesTitle || !els.modalDevicesSubtitle) return;
+  if (state.currentUser) {
+    els.modalDevicesTitle.textContent = I18n.t("modalDevicesTitle");
+    els.modalDevicesSubtitle.textContent = I18n.t("modalDevicesSubtitle");
+  } else {
+    els.modalDevicesTitle.textContent = I18n.t("modalPairNewDeviceTitle");
+    els.modalDevicesSubtitle.textContent = I18n.t("modalPairNewDeviceSubtitle");
+  }
+}
 
-els.btnCloseDevices.addEventListener("click", () => {
+function setPairActionMode(mode) {
+  state.selectedPairAction = mode;
+  if (els.btnAddPhone) {
+    els.btnAddPhone.className = mode === "add_phone" ? "tab active" : "tab";
+  }
+  if (els.btnChangePhone) {
+    els.btnChangePhone.className = mode === "change_phone" ? "tab active" : "tab";
+  }
+}
+
+function openDevicesModal() {
+  hideAlert(els.devicesAlert);
+  updateDevicesModalHeaderCopy();
+
+  if (state.currentUser) {
+    // Current device is ALREADY verified -> show Approver & Device Management view ONLY
+    if (els.unauthNewDeviceView) els.unauthNewDeviceView.style.display = "none";
+    if (els.verifiedDeviceView) els.verifiedDeviceView.style.display = "block";
+    els.modalDevices.style.display = "flex";
+    loadDevicesAndRequests();
+
+    if (state.approverPollTimer) {
+      clearInterval(state.approverPollTimer);
+    }
+    state.approverPollTimer = setInterval(() => {
+      if (els.modalDevices.style.display === "flex" && state.currentUser) {
+        loadDevicesAndRequests();
+      }
+    }, 3000);
+  } else {
+    // Unauthenticated new device -> show New Device Pairing Initiator view ONLY
+    if (els.verifiedDeviceView) els.verifiedDeviceView.style.display = "none";
+    if (els.unauthNewDeviceView) els.unauthNewDeviceView.style.display = "block";
+    if (els.pairUsername && !els.pairUsername.value && els.loginUsername.value.trim()) {
+      els.pairUsername.value = els.loginUsername.value.trim();
+    }
+    setPairActionMode(state.selectedPairAction || "add_phone");
+    els.modalDevices.style.display = "flex";
+  }
+}
+
+function closeDevicesModal() {
   if (state.phonePollTimer) {
     clearInterval(state.phonePollTimer);
     state.phonePollTimer = null;
   }
+  if (state.approverPollTimer) {
+    clearInterval(state.approverPollTimer);
+    state.approverPollTimer = null;
+  }
   els.modalDevices.style.display = "none";
+}
+
+els.btnOpenDevices.addEventListener("click", () => {
+  openDevicesModal();
+});
+
+if (els.btnAuthPairPhone) {
+  els.btnAuthPairPhone.addEventListener("click", () => {
+    openDevicesModal();
+  });
+}
+
+if (els.btnRefreshRequests) {
+  els.btnRefreshRequests.addEventListener("click", () => {
+    loadDevicesAndRequests();
+  });
+}
+
+els.btnCloseDevices.addEventListener("click", () => {
+  closeDevicesModal();
 });
 
 async function loadDevicesAndRequests() {
+  if (!state.currentUser) {
+    return;
+  }
   try {
     const devRes = await apiFetch("/api/v1/devices");
-    const devData = await devRes.json();
-    renderDevices(devData.devices || []);
+    if (devRes.ok) {
+      const devData = await devRes.json();
+      state.cachedDevices = devData.devices || [];
+      renderDevices(state.cachedDevices);
+      updateSingleDeviceWarning(state.cachedDevices);
+    }
 
     const reqRes = await apiFetch("/api/v1/devices/requests/pending");
-    const reqData = await reqRes.json();
-    renderPendingRequests(reqData.requests || []);
+    if (reqRes.ok) {
+      const reqData = await reqRes.json();
+      state.cachedPendingRequests = reqData.requests || [];
+      renderPendingRequests(state.cachedPendingRequests);
+    }
   } catch (err) {
     showAlert(els.devicesAlert, err.message);
   }
@@ -905,6 +1125,9 @@ async function loadDevicesAndRequests() {
 // XSS-Safe Device Rendering using textContent and DOM APIs
 function renderDevices(devices) {
   els.devicesList.innerHTML = "";
+  const locale = I18n.lang === "zh" ? "zh-CN" : "en-US";
+  const verifiedTotal = devices.filter((x) => x.status === "verified").length;
+
   for (const d of devices) {
     const li = document.createElement("li");
     li.className = "device-item";
@@ -915,23 +1138,35 @@ function renderDevices(devices) {
 
     const badge = document.createElement("span");
     badge.className = `badge badge-${d.status === "verified" ? "success" : "neutral"}`;
-    badge.textContent = d.status;
-
-    const dateEl = document.createElement("small");
-    dateEl.className = "text-muted";
-    dateEl.textContent = `Enrolled: ${new Date(d.created_at).toLocaleDateString()}`;
+    badge.textContent =
+      d.status === "verified" ? I18n.t("statusVerified") : I18n.t("statusRevoked");
 
     info.appendChild(nameEl);
     info.appendChild(document.createTextNode(" "));
     info.appendChild(badge);
+
+    if (state.activeCredId && d.id === state.activeCredId) {
+      const currentBadge = document.createElement("span");
+      currentBadge.className = "badge badge-primary";
+      currentBadge.textContent = I18n.t("deviceCurrentBadge");
+      info.appendChild(document.createTextNode(" "));
+      info.appendChild(currentBadge);
+    }
+
+    const dateEl = document.createElement("small");
+    dateEl.className = "text-muted";
+    dateEl.textContent = I18n.t("enrolledDatePrefix", {
+      date: new Date(d.created_at).toLocaleDateString(locale),
+    });
+
     info.appendChild(document.createElement("br"));
     info.appendChild(dateEl);
 
     const actions = document.createElement("div");
-    if (d.status === "verified" && devices.filter((x) => x.status === "verified").length > 1) {
+    if (d.status === "verified" && verifiedTotal > 1) {
       const btnRevoke = document.createElement("button");
       btnRevoke.className = "btn btn-danger btn-sm";
-      btnRevoke.textContent = "Revoke";
+      btnRevoke.textContent = I18n.t("btnRevoke");
       btnRevoke.addEventListener("click", () => revokeDevice(d.id, d.device_name));
       actions.appendChild(btnRevoke);
     }
@@ -947,8 +1182,8 @@ function renderPendingRequests(requests) {
   els.pendingRequestsList.innerHTML = "";
   if (requests.length === 0) {
     const emptyLi = document.createElement("li");
-    emptyLi.className = "text-muted";
-    emptyLi.textContent = "No pending device requests.";
+    emptyLi.className = "text-muted small";
+    emptyLi.textContent = I18n.t("noPendingRequests");
     els.pendingRequestsList.appendChild(emptyLi);
     return;
   }
@@ -963,27 +1198,37 @@ function renderPendingRequests(requests) {
 
     const expEl = document.createElement("small");
     expEl.className = "text-muted";
-    expEl.textContent = "Expires in 5 minutes";
+    expEl.textContent = I18n.t("expiresIn5Min");
+
+    const actionDesc =
+      r.action_type === "change_phone"
+        ? I18n.t("wantsToConnectReplace")
+        : I18n.t("wantsToConnectAdd");
 
     title.appendChild(nameEl);
-    title.appendChild(document.createTextNode(` wants to connect (${r.action_type})`));
+    title.appendChild(document.createTextNode(` ${actionDesc}`));
     title.appendChild(document.createElement("br"));
     title.appendChild(expEl);
+
+    const controls = document.createElement("div");
+    controls.className = "request-controls";
 
     const inputCode = document.createElement("input");
     inputCode.type = "text";
     inputCode.className = "form-control form-control-sm";
-    inputCode.placeholder = "Enter 6-digit code shown on new phone";
+    inputCode.placeholder = I18n.t("inputCodePlaceholder");
     inputCode.maxLength = 6;
 
     const btnApprove = document.createElement("button");
     btnApprove.className = "btn btn-success btn-sm";
-    btnApprove.textContent = "Verify & Approve";
+    btnApprove.textContent = I18n.t("btnVerifyApprove");
     btnApprove.addEventListener("click", () => approveDeviceRequest(r, inputCode.value.trim()));
 
+    controls.appendChild(inputCode);
+    controls.appendChild(btnApprove);
+
     li.appendChild(title);
-    li.appendChild(inputCode);
-    li.appendChild(btnApprove);
+    li.appendChild(controls);
     els.pendingRequestsList.appendChild(li);
   }
 }
@@ -991,14 +1236,20 @@ function renderPendingRequests(requests) {
 // Approve New Phone on Verified Device
 async function approveDeviceRequest(req, code) {
   if (!code || code.length !== 6) {
-    showAlert(els.devicesAlert, "Please enter the exact 6-digit code shown on the new phone.");
+    showAlert(els.devicesAlert, I18n.t("invalid6DigitCode"));
     return;
   }
 
   try {
     const codeHash = await CryptoUtils.sha256Hex(code);
-    if (codeHash !== req.verification_code_hash) {
-      showAlert(els.devicesAlert, "Incorrect 6-digit verification code. Please check the new phone's screen.");
+    const enc = new TextEncoder();
+    if (
+      !CryptoUtils.constantTimeCompare(
+        enc.encode(codeHash.toLowerCase()),
+        enc.encode((req.verification_code_hash || "").toLowerCase())
+      )
+    ) {
+      showAlert(els.devicesAlert, I18n.t("incorrect6DigitCode"));
       return;
     }
 
@@ -1052,31 +1303,44 @@ async function approveDeviceRequest(req, code) {
       throw new Error(d.message || d.error);
     }
 
-    showAlert(els.devicesAlert, `Successfully approved ${req.new_device_name}!`, "success");
+    showAlert(
+      els.devicesAlert,
+      I18n.t("approvedSuccessAlert", { name: req.new_device_name }),
+      "success"
+    );
     loadDevicesAndRequests();
   } catch (err) {
-    showAlert(els.devicesAlert, "Approval failed: " + err.message);
+    showAlert(els.devicesAlert, I18n.t("approvalFailedAlert", { err: err.message }));
   }
 }
 
-// Start Add/Change Phone from New Phone
+// Start Add/Change Phone from New Unverified Phone ONLY
 async function startPhoneHandshake(actionType) {
-  const deviceName = prompt("Enter a name for this new phone (e.g. 'Pixel 9', 'iPhone 16'):");
-  if (!deviceName) return;
+  hideAlert(els.devicesAlert);
 
-  let replaceCredId = "";
-  if (actionType === "change_phone" && state.activeCredId) {
-    if (confirm("Replace currently active phone passkey with this new phone?")) {
-      replaceCredId = state.activeCredId;
-    }
+  // Guard: never allow an already-verified signed-in device to add itself as a new device
+  if (state.currentUser) {
+    showAlert(els.devicesAlert, I18n.t("alreadyVerifiedDeviceError"));
+    return;
+  }
+
+  const targetUsername = els.pairUsername ? els.pairUsername.value.trim() : "";
+  const deviceName = els.pairDeviceName ? els.pairDeviceName.value.trim() : "";
+  if (!targetUsername || !deviceName) {
+    showAlert(els.devicesAlert, I18n.t("pairFieldsRequired"));
+    return;
   }
 
   try {
     const ecdhPair = await CryptoUtils.generateECDHKeyPair();
     const pubBytes = await CryptoUtils.exportECDHPublicKey(ecdhPair.publicKey);
 
-    // Generate random 6-digit code
-    const randomVals = crypto.getRandomValues(new Uint32Array(1));
+    // Generate unbiased random 6-digit code via rejection sampling
+    const maxUnbiased = Math.floor(0x100000000 / 900000) * 900000;
+    const randomVals = new Uint32Array(1);
+    do {
+      crypto.getRandomValues(randomVals);
+    } while (randomVals[0] >= maxUnbiased);
     const code = String(100000 + (randomVals[0] % 900000));
     const codeHash = await CryptoUtils.sha256Hex(code);
 
@@ -1084,9 +1348,8 @@ async function startPhoneHandshake(actionType) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        username: state.currentUser ? state.currentUser.username : prompt("Enter your username:"),
+        username: targetUsername,
         action_type: actionType,
-        replace_credential_id: replaceCredId,
         device_name: deviceName,
         new_device_ecdh_pub: CryptoUtils.bytesToBase64Url(pubBytes),
         verification_code_hash: codeHash,
@@ -1101,22 +1364,29 @@ async function startPhoneHandshake(actionType) {
 
     els.newPhoneSection.style.display = "block";
     els.newPhoneCodeDisplay.textContent = `${code.slice(0, 3)} ${code.slice(3)}`;
-    els.newPhoneStatusText.textContent = "Waiting for approval on your verified device...";
+    els.newPhoneStatusText.textContent = I18n.t("newPhoneWaitingStatus");
 
     // Poll status
+    if (state.phonePollTimer) {
+      clearInterval(state.phonePollTimer);
+    }
     state.phonePollTimer = setInterval(async () => {
       try {
-        const stRes = await fetch(`/api/v1/devices/requests/${encodeURIComponent(reqData.request_id)}/status`);
+        const stRes = await fetch(
+          `/api/v1/devices/requests/${encodeURIComponent(reqData.request_id)}/status`
+        );
         const stData = await stRes.json();
         if (stData.status === "approved") {
           clearInterval(state.phonePollTimer);
           state.phonePollTimer = null;
-          els.newPhoneStatusText.textContent = "Approved! Creating Passkey and completing transfer...";
+          els.newPhoneStatusText.textContent = I18n.t("newPhoneApprovedStatus");
           await completePhoneHandshake(stData);
         } else if (stData.status === "expired" || stData.status === "rejected") {
           clearInterval(state.phonePollTimer);
           state.phonePollTimer = null;
-          els.newPhoneStatusText.textContent = `Request ${stData.status}.`;
+          els.newPhoneStatusText.textContent = I18n.t("newPhoneStatusPrefix", {
+            status: stData.status,
+          });
         }
       } catch (e) {}
     }, 2000);
@@ -1155,33 +1425,49 @@ async function completePhoneHandshake(statusData) {
     const { wrappedMek, wrappedMekIv } = await CryptoUtils.wrapMek(passkeyKek, rawMek);
     CryptoUtils.zeroBuffer(rawMek);
 
-    const compRes = await fetch(`/api/v1/devices/requests/${encodeURIComponent(state.pendingNewPhoneRequestId)}/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        attestation: WebAuthnHelper.serializeCreationResponse(credential),
-        wrapped_mek: CryptoUtils.bytesToBase64Url(wrappedMek),
-        wrapped_mek_iv: CryptoUtils.bytesToBase64Url(wrappedMekIv),
-      }),
-    });
+    const compRes = await fetch(
+      `/api/v1/devices/requests/${encodeURIComponent(state.pendingNewPhoneRequestId)}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attestation: WebAuthnHelper.serializeCreationResponse(credential),
+          wrapped_mek: CryptoUtils.bytesToBase64Url(wrappedMek),
+          wrapped_mek_iv: CryptoUtils.bytesToBase64Url(wrappedMekIv),
+        }),
+      }
+    );
     const compData = await compRes.json();
     if (!compRes.ok) throw new Error(compData.message || compData.error);
 
-    els.newPhoneStatusText.textContent = "Successfully enrolled and verified this device!";
-    setTimeout(() => {
+    if (compData.csrf_token) {
+      state.csrfToken = compData.csrf_token;
+    }
+    if (compData.credential_id) {
+      state.activeCredId = compData.credential_id;
+    }
+
+    els.newPhoneStatusText.textContent = I18n.t("newPhoneEnrolledStatus");
+    setTimeout(async () => {
       els.newPhoneSection.style.display = "none";
-      loadDevicesAndRequests();
-    }, 2000);
+      closeDevicesModal();
+      await checkAuthStatus();
+    }, 1200);
   } catch (err) {
-    showAlert(els.devicesAlert, "Handshake completion failed: " + err.message);
+    showAlert(els.devicesAlert, I18n.t("handshakeFailedAlert", { err: err.message }));
   }
 }
 
-els.btnAddPhone.addEventListener("click", () => startPhoneHandshake("add_phone"));
-els.btnChangePhone.addEventListener("click", () => startPhoneHandshake("change_phone"));
+els.btnAddPhone.addEventListener("click", () => setPairActionMode("add_phone"));
+els.btnChangePhone.addEventListener("click", () => setPairActionMode("change_phone"));
+if (els.btnStartPairing) {
+  els.btnStartPairing.addEventListener("click", () =>
+    startPhoneHandshake(state.selectedPairAction || "add_phone")
+  );
+}
 
 async function revokeDevice(credIdHex, deviceName) {
-  if (!confirm(`Revoke device "${deviceName}"? Passkey verification required.`)) return;
+  if (!confirm(I18n.t("confirmRevokeDevice", { name: deviceName }))) return;
   try {
     const chRes = await apiFetch(`/api/v1/keys/new/challenge`, { method: "POST" });
     const chData = await chRes.json();
@@ -1202,12 +1488,12 @@ async function revokeDevice(credIdHex, deviceName) {
       const d = await revRes.json();
       throw new Error(d.message || d.error);
     }
-    showAlert(els.devicesAlert, `Device ${deviceName} revoked.`, "info");
+    showAlert(els.devicesAlert, I18n.t("deviceRevokedAlert", { name: deviceName }), "info");
     loadDevicesAndRequests();
   } catch (err) {
-    showAlert(els.devicesAlert, "Revocation failed: " + err.message);
+    showAlert(els.devicesAlert, I18n.t("revokeFailedAlert", { err: err.message }));
   }
 }
 
-// Initial Boot
+// Start App
 checkSealStatus();

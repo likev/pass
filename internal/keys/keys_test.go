@@ -139,6 +139,27 @@ func TestKeyService(t *testing.T) {
 		t.Fatalf("Expected replay of step-up challenge to fail, but it succeeded")
 	}
 
+	// 6b. Cross-user step-up token substitution must fail
+	otherUserID := uuid.NewString()
+	_ = database.CreateUser(ctx, otherUserID, "otheruser", "Other User")
+	otherCredID := []byte("other-cred-123")
+	_ = database.CreateCredential(ctx, &db.Credential{
+		ID:              otherCredID,
+		UserID:          otherUserID,
+		DeviceName:      "Other Device",
+		PublicKey:       []byte("pubkey-other"),
+		AttestationType: "none",
+		PRFSalt:         make([]byte, 32),
+		WrappedMEK:      []byte("wrapped-mek-other"),
+		WrappedMEKIV:    make([]byte, 12),
+		Status:          "verified",
+	})
+	crossStepUpID := "test-stepup-cross-user"
+	authSvc.AddTestStepUpSession(crossStepUpID, otherUserID, otherCredID)
+	if _, err := keySvc.RetrieveSingleKey(ctx, meta.ID, userID, credID, crossStepUpID, []byte("simulated-assertion"), "127.0.0.1"); err == nil {
+		t.Fatalf("Expected cross-user step-up token substitution in RetrieveSingleKey to fail")
+	}
+
 	// 7. Update Key with step-up assertion
 	stepUpID2 := "test-stepup-upd-1"
 	authSvc.AddTestStepUpSession(stepUpID2, userID, credID)

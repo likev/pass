@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"passmanager/internal/auth"
@@ -55,6 +56,19 @@ func NormalizeHost(host, scheme string) string {
 	return host
 }
 
+func isValidHostValue(h string) bool {
+	if h == "" || len(h) > 255 {
+		return false
+	}
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		if c <= 0x20 || c >= 0x7f || c == '/' || c == '\\' || c == '?' || c == '#' || c == '@' {
+			return false
+		}
+	}
+	return true
+}
+
 // GetRequestHost extracts the external host from X-Forwarded-Host or Host header.
 // It also takes X-Forwarded-Port into account when host does not specify a port.
 func GetRequestHost(r *http.Request) string {
@@ -62,10 +76,16 @@ func GetRequestHost(r *http.Request) string {
 	host := ""
 	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
 		parts := strings.Split(xfh, ",")
-		host = strings.TrimSpace(parts[0])
+		candidate := strings.TrimSpace(parts[0])
+		if isValidHostValue(candidate) {
+			host = candidate
+		}
 	}
 	if host == "" && r.Host != "" {
-		host = strings.TrimSpace(r.Host)
+		candidate := strings.TrimSpace(r.Host)
+		if isValidHostValue(candidate) {
+			host = candidate
+		}
 	}
 	if host == "" {
 		host = "localhost"
@@ -74,8 +94,10 @@ func GetRequestHost(r *http.Request) string {
 	// If host does not specify a port, check X-Forwarded-Port
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); xfp != "" {
-			if (scheme == "https" && xfp != "443") || (scheme == "http" && xfp != "80") {
-				host = host + ":" + xfp
+			if portNum, pErr := strconv.Atoi(xfp); pErr == nil && portNum > 0 && portNum <= 65535 {
+				if (scheme == "https" && xfp != "443") || (scheme == "http" && xfp != "80") {
+					host = host + ":" + xfp
+				}
 			}
 		}
 	}
