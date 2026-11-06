@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Passkey Web Key Manager</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <!-- 3-Minute Clipboard Auto-Clear Banner -->
+  <div id="banner-clipboard" class="clipboard-banner" style="display: none;">
+    <div class="banner-content">
+      <span class="shield-icon">🛡️</span>
+      <span id="clipboard-text">Decrypted key in clipboard — auto-clearing in 02:59</span>
+      <button id="btn-clear-clipboard" class="btn btn-sm btn-clear-now">Clear Clipboard Now</button>
+    </div>
+    <div class="progress-container">
+      <div id="clipboard-progress-bar" class="progress-bar"></div>
+    </div>
+  </div>
+
+  <div class="app-container">
+    <header class="app-header">
+      <div class="brand">
+        <span class="logo-icon">🔐</span>
+        <h1>Web Key Manager</h1>
+        <span class="badge badge-zero-knowledge">E2EE Zero-Knowledge</span>
+      </div>
+      <div id="header-user-actions" class="header-actions" style="display: none;">
+        <span id="user-display-name" class="user-name"></span>
+        <button id="btn-open-devices" class="btn btn-outline btn-sm">Devices</button>
+        <button id="btn-logout" class="btn btn-outline btn-sm">Sign Out</button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <!-- 1. Unseal / Setup View -->
+      <section id="view-unseal" class="card view-card" style="display: none;">
+        <h2 id="unseal-title">Server Master Key Unseal</h2>
+        <p id="unseal-desc" class="text-muted">Enter the Admin Startup Passphrase to unseal SMK into mlock RAM.</p>
+        <div id="unseal-alert" class="alert alert-error" style="display: none;"></div>
+
+        <div class="form-group">
+          <label for="unseal-passphrase">Admin Startup Passphrase (min 12 chars)</label>
+          <input type="password" id="unseal-passphrase" class="form-control" placeholder="••••••••••••" autocomplete="current-password">
+        </div>
+        <div id="unseal-passphrase-confirm-row" class="form-group" style="display: none;">
+          <label for="unseal-passphrase-confirm">Confirm Admin Startup Passphrase</label>
+          <input type="password" id="unseal-passphrase-confirm" class="form-control" placeholder="••••••••••••" autocomplete="new-password">
+        </div>
+        <button id="btn-unseal-submit" class="btn btn-primary btn-block">Unseal Server</button>
+      </section>
+
+      <!-- 2. Passkey Auth View -->
+      <section id="view-auth" class="card view-card" style="display: none;">
+        <div class="auth-tabs">
+          <h2>Passkey Authentication</h2>
+          <p class="text-muted">No master passwords or plaintext secrets. Protected by WebAuthn hardware biometric passkeys with PRF client-side encryption.</p>
+        </div>
+        <div id="auth-alert" class="alert alert-error" style="display: none;"></div>
+
+        <div class="auth-split">
+          <!-- Login -->
+          <div class="auth-column">
+            <h3>Sign In with Passkey</h3>
+            <div class="form-group">
+              <label for="login-username">Username (Optional for discoverable passkey)</label>
+              <input type="text" id="login-username" class="form-control" placeholder="alice" autocomplete="username webauthn">
+            </div>
+            <button id="btn-login" class="btn btn-primary btn-block">Sign In with Passkey</button>
+          </div>
+
+          <div class="auth-divider">OR</div>
+
+          <!-- Register -->
+          <div class="auth-column">
+            <h3>Register First Device</h3>
+            <div class="form-group">
+              <label for="reg-username">Username *</label>
+              <input type="text" id="reg-username" class="form-control" placeholder="alice" autocomplete="username">
+            </div>
+            <div class="form-group">
+              <label for="reg-display-name">Display Name</label>
+              <input type="text" id="reg-display-name" class="form-control" placeholder="Alice Smith">
+            </div>
+            <div class="form-group">
+              <label for="reg-device-name">Device Name</label>
+              <input type="text" id="reg-device-name" class="form-control" placeholder="MacBook Pro / Pixel 9">
+            </div>
+            <button id="btn-register" class="btn btn-secondary btn-block">Create Passkey & Register</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Main Dashboard View -->
+      <section id="view-dashboard" class="dashboard-section" style="display: none;">
+        <div class="dashboard-toolbar">
+          <div class="search-box">
+            <input type="text" id="keys-filter" class="form-control" placeholder="🔍 Filter keys by name (metadata only)...">
+          </div>
+          <button id="btn-open-create-key" class="btn btn-primary">+ Create New Key</button>
+        </div>
+
+        <div id="keys-alert" class="alert alert-info" style="display: none;"></div>
+
+        <div class="card keys-card">
+          <div class="card-header">
+            <h3>Stored Keys</h3>
+            <small class="text-muted">Strictly gated single-key retrieval with Passkey verification</small>
+          </div>
+          <ul id="keys-list" class="keys-list"></ul>
+        </div>
+      </section>
+    </main>
+
+    <!-- Modal: Create New Key (3 Modes) -->
+    <div id="modal-create-key" class="modal-overlay" style="display: none;">
+      <div class="modal-content card">
+        <div class="modal-header">
+          <h3>Create New Key</h3>
+          <button id="btn-close-create-key" class="modal-close">&times;</button>
+        </div>
+        <div id="create-key-alert" class="alert alert-error" style="display: none;"></div>
+
+        <div class="form-group">
+          <label for="key-name">Key Name (e.g. prod-aws-secret, github-pat) *</label>
+          <input type="text" id="key-name" class="form-control" placeholder="my-service-key" spellcheck="false">
+        </div>
+
+        <!-- 3-Mode Selection Tabs -->
+        <div class="tabs-nav">
+          <button id="tab-type" class="tab active">1. Type Manually</button>
+          <button id="tab-paste" class="tab">2. Paste Key</button>
+          <button id="tab-gen" class="tab">3. Auto-Generate</button>
+        </div>
+
+        <!-- Mode A: Type Twice -->
+        <div id="section-type" class="tab-pane">
+          <p class="text-muted small">Because secrets are never shown on screen, please type your secret twice to verify byte-for-byte match.</p>
+          <div class="form-group">
+            <label for="key-type-primary">Enter Key *</label>
+            <input type="password" id="key-type-primary" class="form-control masked-input" placeholder="••••••••••••" autocomplete="new-password" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label for="key-type-confirm">Confirm Key (paste disabled) *</label>
+            <input type="password" id="key-type-confirm" class="form-control masked-input" placeholder="••••••••••••" autocomplete="new-password" spellcheck="false">
+          </div>
+        </div>
+
+        <!-- Mode B: Paste -->
+        <div id="section-paste" class="tab-pane" style="display: none;">
+          <p class="text-muted small">Paste key directly from system clipboard into ephemeral RAM. Plaintext is never stored in DOM.</p>
+          <div class="paste-box">
+            <button id="btn-paste-capture" type="button" class="btn btn-secondary">📋 Paste from Clipboard</button>
+            <span id="paste-status-badge" class="badge badge-neutral">No pasted key captured yet.</span>
+          </div>
+          <p class="text-muted small">Note: Pasting automatically starts the 3-minute clipboard auto-clear timer to wipe the secret from your OS clipboard.</p>
+        </div>
+
+        <!-- Mode C: Auto-Generate -->
+        <div id="section-gen" class="tab-pane" style="display: none;">
+          <p class="text-muted small">Generate unbiased high-entropy keys via in-memory CSPRNG rejection sampling. Never rendered in DOM.</p>
+          <div class="form-group">
+            <label for="gen-preset">Format Preset</label>
+            <select id="gen-preset" class="form-control">
+              <option value="password">Random Password (A-Z, a-z, 0-9, Symbols)</option>
+              <option value="hex">Hex Key (256-bit / 64 hex chars)</option>
+              <option value="base64url">Base64URL Secret (256-bit)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="gen-length">Length: <span id="gen-length-val">32</span> characters</label>
+            <input type="range" id="gen-length" min="16" max="128" value="32" class="form-range">
+          </div>
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" id="gen-copy-checkbox" checked>
+              Also copy generated key to clipboard (auto-clears in 3 minutes)
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="btn-save-key" class="btn btn-primary btn-block">Encrypt & Save with Passkey</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Devices & Verified-Device Phone Enrollment -->
+    <div id="modal-devices" class="modal-overlay" style="display: none;">
+      <div class="modal-content card">
+        <div class="modal-header">
+          <h3>Verified Devices & Phone Management</h3>
+          <button id="btn-close-devices" class="modal-close">&times;</button>
+        </div>
+        <div id="devices-alert" class="alert alert-error" style="display: none;"></div>
+
+        <div class="device-actions-bar">
+          <button id="btn-add-phone" class="btn btn-outline btn-sm">📱 Connect New Phone</button>
+          <button id="btn-change-phone" class="btn btn-outline btn-sm">🔄 Replace Old Phone</button>
+        </div>
+
+        <!-- New Phone Handshake Display Section -->
+        <div id="new-phone-section" class="card highlight-card" style="display: none;">
+          <h4>New Phone Pairing Code</h4>
+          <p class="small text-muted">Enter this 6-digit code on an already-verified device to authorize this phone:</p>
+          <div id="new-phone-code-display" class="pairing-code">--- ---</div>
+          <div id="new-phone-status-text" class="status-indicator">Waiting for approval on verified device...</div>
+        </div>
+
+        <div class="section-divider"></div>
+        <h4>Pending Approval Requests</h4>
+        <ul id="pending-requests-list" class="device-list"></ul>
+
+        <div class="section-divider"></div>
+        <h4>Enrolled Verified Devices</h4>
+        <ul id="devices-list" class="device-list"></ul>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
