@@ -142,6 +142,11 @@ func (s *Server) handleSealStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUnseal(w http.ResponseWriter, r *http.Request) {
+	if s.sealMgr.IsUnsealed() {
+		writeError(w, http.StatusBadRequest, "already_unsealed", "Server is already unsealed")
+		return
+	}
+
 	var body struct {
 		Passphrase        string `json:"passphrase"`
 		ConfirmPassphrase string `json:"confirm_passphrase,omitempty"`

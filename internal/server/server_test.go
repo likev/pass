@@ -129,6 +129,38 @@ func TestServerSealedGuardAndUnseal(t *testing.T) {
 	if statusResp2["unsealed"] != true || statusResp2["initialized"] != true {
 		t.Fatalf("expected unsealed=true, got %+v", statusResp2)
 	}
+
+	// 7. Verify sealed key file on disk cannot be changed or overwritten after unsealing
+	keyFilePath := filepath.Join(tempDir, "server_master.key.enc")
+	fileBytesBefore, err := os.ReadFile(keyFilePath)
+	if err != nil {
+		t.Fatalf("failed to read key file: %v", err)
+	}
+
+	// Attempt to call unseal again with a different passphrase (using a fresh IP to avoid test rate-limiting)
+	tamperPayload := `{"passphrase": "malicious-new-passphrase-5678", "confirm_passphrase": "malicious-new-passphrase-5678"}`
+	req7 := httptest.NewRequest("POST", "/api/v1/admin/unseal", bytes.NewBufferString(tamperPayload))
+	req7.RemoteAddr = "192.0.2.55:1234"
+	w7 := httptest.NewRecorder()
+	handler.ServeHTTP(w7, req7)
+	if w7.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when already unsealed, got %d: %s", w7.Code, w7.Body.String())
+	}
+
+	// Assert disk file was NOT modified
+	fileBytesAfter, err := os.ReadFile(keyFilePath)
+	if err != nil {
+		t.Fatalf("failed to read key file: %v", err)
+	}
+	if !bytes.Equal(fileBytesBefore, fileBytesAfter) {
+		t.Fatalf("FATAL: server_master.key.enc was modified after unseal attempt!")
+	}
+
+	// Re-verify that original passphrase still decrypts the key file
+	sealMgr.Seal()
+	if err := sealMgr.Unseal("valid-passphrase-1234"); err != nil {
+		t.Fatalf("original passphrase should still work, but got: %v", err)
+	}
 }
 
 func TestKeysAndBackupAPI(t *testing.T) {
