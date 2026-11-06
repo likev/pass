@@ -86,8 +86,46 @@ func TestKeyService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateKey failed: %v", err)
 	}
-	if meta.Name != "prod-aws-token" || meta.ID == "" {
+	if meta.Name != "prod-aws-token" || meta.ID == "" || meta.KeyType != "secret" {
 		t.Fatalf("Unexpected metadata: %+v", meta)
+	}
+
+	// 1b. Create a TOTP Key and verify key_type is preserved in metadata and single-key retrieval
+	totpPayload := &CreateKeyPayload{
+		Name:             "GitHub (charlie)",
+		KeyType:          "totp",
+		ClientCiphertext: base64.RawURLEncoding.EncodeToString([]byte("encrypted-otpauth-uri")),
+		ClientIV:         base64.RawURLEncoding.EncodeToString(clientIV),
+		ClientSalt:       base64.RawURLEncoding.EncodeToString(clientSalt),
+	}
+	totpMeta, err := keySvc.CreateKey(ctx, userID, totpPayload, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateKey (totp) failed: %v", err)
+	}
+	if totpMeta.KeyType != "totp" {
+		t.Fatalf("Expected KeyType 'totp', got %q", totpMeta.KeyType)
+	}
+	totpList, err := keySvc.ListKeys(ctx, userID, "github")
+	if err != nil || len(totpList) != 1 || totpList[0].KeyType != "totp" {
+		t.Fatalf("Expected ListKeys for TOTP to return 1 totp item, got %+v (err=%v)", totpList, err)
+	}
+	stepUpTotp := "test-stepup-totp-1"
+	authSvc.AddTestStepUpSession(stepUpTotp, userID, credID)
+	totpSingle, err := keySvc.RetrieveSingleKey(ctx, totpMeta.ID, userID, credID, stepUpTotp, []byte("simulated-assertion"), "127.0.0.1")
+	if err != nil || totpSingle.KeyType != "totp" {
+		t.Fatalf("RetrieveSingleKey for TOTP failed or wrong KeyType: %+v, err=%v", totpSingle, err)
+	}
+
+	// Invalid key_type should be rejected
+	badTypePayload := &CreateKeyPayload{
+		Name:             "bad-type-key",
+		KeyType:          "unknown_type",
+		ClientCiphertext: base64.RawURLEncoding.EncodeToString(clientPlaintextCT),
+		ClientIV:         base64.RawURLEncoding.EncodeToString(clientIV),
+		ClientSalt:       base64.RawURLEncoding.EncodeToString(clientSalt),
+	}
+	if _, err := keySvc.CreateKey(ctx, userID, badTypePayload, "127.0.0.1"); err == nil {
+		t.Fatalf("Expected invalid key_type to be rejected")
 	}
 
 	// 2. Duplicate key name fails

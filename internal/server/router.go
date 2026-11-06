@@ -612,9 +612,10 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":     meta.ID,
-		"name":   meta.Name,
-		"status": "created",
+		"id":       meta.ID,
+		"name":     meta.Name,
+		"key_type": meta.KeyType,
+		"status":   "created",
 	})
 }
 

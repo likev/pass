@@ -68,6 +68,7 @@ func (ks *KeyService) ListKeys(ctx context.Context, userID, query string) ([]db.
 
 type CreateKeyPayload struct {
 	Name             string `json:"name"`
+	KeyType          string `json:"key_type,omitempty"`  // "secret" or "totp"
 	ClientCiphertext string `json:"client_ciphertext"` // base64
 	ClientIV         string `json:"client_iv"`         // base64
 	ClientSalt       string `json:"client_salt"`       // base64
@@ -86,6 +87,14 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 		return nil, errors.New("key name exceeds 256 characters")
 	}
 	nameNorm := strings.ToLower(name)
+
+	keyType := strings.ToLower(strings.TrimSpace(payload.KeyType))
+	if keyType == "" {
+		keyType = "secret"
+	}
+	if keyType != "secret" && keyType != "totp" {
+		return nil, errors.New("invalid key_type: must be 'secret' or 'totp'")
+	}
 
 	cCT, err := base64.RawURLEncoding.DecodeString(payload.ClientCiphertext)
 	if err != nil {
@@ -157,6 +166,7 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 		UserID:           userID,
 		Name:             name,
 		NameNormalized:   nameNorm,
+		KeyType:          keyType,
 		ServerCiphertext: sCT,
 		ServerIV:         sIV,
 		ServerSalt:       sSalt,
@@ -178,11 +188,12 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 		return nil, fmt.Errorf("failed to save key: %w", err)
 	}
 
-	_ = ks.db.InsertAuditLog(ctx, &userID, "key_created", ipAddr, fmt.Sprintf("created key %s", name))
+	_ = ks.db.InsertAuditLog(ctx, &userID, "key_created", ipAddr, fmt.Sprintf("created key %s (%s)", name, keyType))
 
 	return &db.KeyMetadata{
-		ID:   keyID,
-		Name: name,
+		ID:      keyID,
+		Name:    name,
+		KeyType: keyType,
 	}, nil
 }
 
@@ -190,6 +201,7 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 type SingleKeyPayload struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
+	KeyType          string `json:"key_type"`
 	ClientCiphertext string `json:"client_ciphertext"` // base64
 	ClientIV         string `json:"client_iv"`         // base64
 	ClientSalt       string `json:"client_salt"`       // base64
@@ -253,6 +265,7 @@ func (ks *KeyService) RetrieveSingleKey(
 	return &SingleKeyPayload{
 		ID:               keyRecord.ID,
 		Name:             keyRecord.Name,
+		KeyType:          keyRecord.KeyType,
 		ClientCiphertext: base64.RawURLEncoding.EncodeToString(clientCiphertext),
 		ClientIV:         base64.RawURLEncoding.EncodeToString(keyRecord.ClientIV),
 		ClientSalt:       base64.RawURLEncoding.EncodeToString(keyRecord.ClientSalt),

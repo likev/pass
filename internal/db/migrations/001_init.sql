@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS keys (
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     name_normalized TEXT NOT NULL,
+    key_type TEXT NOT NULL DEFAULT 'secret',
     server_ciphertext BLOB NOT NULL,
     server_iv BLOB NOT NULL,
     server_salt BLOB NOT NULL,

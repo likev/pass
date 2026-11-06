@@ -6,6 +6,7 @@ import { CryptoUtils } from "./crypto.js";
 import { WebAuthnHelper } from "./webauthn.js";
 import { ClipboardGuard } from "./clipboard.js";
 import { I18n } from "./i18n.js";
+import { TOTPUtils } from "./totp.js";
 
 // Key size limit: 10KB (10,240 bytes)
 const MAX_KEY_SIZE_BYTES = 10 * 1024;
@@ -18,6 +19,9 @@ const state = {
   sealed: true,
   initialized: false,
   pendingPastedBytes: null, // Ephemeral Uint8Array for pasted key
+  pendingTotpBytes: null, // Ephemeral Uint8Array for TOTP otpauth:// URI
+  pendingTotpMeta: null, // { digits, period }
+  selectedTypeFilter: "all", // "all" | "secret" | "totp"
   pendingNewPhoneECDH: null,
   pendingNewPhoneCode: null,
   pendingNewPhoneRequestId: null,
@@ -70,6 +74,9 @@ const els = {
   singleDeviceWarning: document.getElementById("single-device-warning"),
   btnWarningAddDevice: document.getElementById("btn-warning-add-device"),
   keysFilter: document.getElementById("keys-filter"),
+  filterTypeAll: document.getElementById("filter-type-all"),
+  filterTypeSecret: document.getElementById("filter-type-secret"),
+  filterTypeTotp: document.getElementById("filter-type-totp"),
   keysCountBadge: document.getElementById("keys-count-badge"),
   keysList: document.getElementById("keys-list"),
   keysAlert: document.getElementById("keys-alert"),
@@ -82,9 +89,11 @@ const els = {
   tabType: document.getElementById("tab-type"),
   tabPaste: document.getElementById("tab-paste"),
   tabGen: document.getElementById("tab-gen"),
+  tabTotp: document.getElementById("tab-totp"),
   sectionType: document.getElementById("section-type"),
   sectionPaste: document.getElementById("section-paste"),
   sectionGen: document.getElementById("section-gen"),
+  sectionTotp: document.getElementById("section-totp"),
   keyTypePrimary: document.getElementById("key-type-primary"),
   keyTypeConfirm: document.getElementById("key-type-confirm"),
   pasteStatusBadge: document.getElementById("paste-status-badge"),
@@ -93,6 +102,14 @@ const els = {
   genLength: document.getElementById("gen-length"),
   genLengthVal: document.getElementById("gen-length-val"),
   genCopyCheckbox: document.getElementById("gen-copy-checkbox"),
+  btnTotpCamera: document.getElementById("btn-totp-camera"),
+  btnTotpCameraLabel: document.getElementById("btn-totp-camera-label"),
+  btnTotpUpload: document.getElementById("btn-totp-upload"),
+  totpQrFile: document.getElementById("totp-qr-file"),
+  totpCameraBox: document.getElementById("totp-camera-box"),
+  totpQrVideo: document.getElementById("totp-qr-video"),
+  totpStatusBadge: document.getElementById("totp-status-badge"),
+  totpSeedInput: document.getElementById("totp-seed-input"),
   btnSaveKey: document.getElementById("btn-save-key"),
   createKeyAlert: document.getElementById("create-key-alert"),
 
@@ -141,6 +158,7 @@ I18n.onChange(() => {
   syncLangButtons();
   updateUnsealCopy();
   updatePasteBadgeCopy();
+  updateTotpBadgeCopy();
   updateDevicesModalHeaderCopy();
   if (state.currentUser) {
     renderKeys(state.cachedKeys);
@@ -550,6 +568,18 @@ els.keysFilter.addEventListener("input", () => {
   }, 250);
 });
 
+function setTypeFilter(type) {
+  state.selectedTypeFilter = type;
+  if (els.filterTypeAll) els.filterTypeAll.classList.toggle("active", type === "all");
+  if (els.filterTypeSecret) els.filterTypeSecret.classList.toggle("active", type === "secret");
+  if (els.filterTypeTotp) els.filterTypeTotp.classList.toggle("active", type === "totp");
+  renderKeys(state.cachedKeys);
+}
+
+if (els.filterTypeAll) els.filterTypeAll.addEventListener("click", () => setTypeFilter("all"));
+if (els.filterTypeSecret) els.filterTypeSecret.addEventListener("click", () => setTypeFilter("secret"));
+if (els.filterTypeTotp) els.filterTypeTotp.addEventListener("click", () => setTypeFilter("totp"));
+
 async function loadKeys(query = "") {
   try {
     const res = await apiFetch(`/api/v1/keys?q=${encodeURIComponent(query)}`);
@@ -564,10 +594,16 @@ async function loadKeys(query = "") {
 
 function renderKeys(keys) {
   els.keysList.innerHTML = "";
+  const filteredKeys = (keys || []).filter((k) => {
+    const kType = k.key_type === "totp" ? "totp" : "secret";
+    if (state.selectedTypeFilter === "all") return true;
+    return kType === state.selectedTypeFilter;
+  });
+
   if (els.keysCountBadge) {
-    els.keysCountBadge.textContent = String(keys.length);
+    els.keysCountBadge.textContent = String(filteredKeys.length);
   }
-  if (keys.length === 0) {
+  if (filteredKeys.length === 0) {
     const emptyLi = document.createElement("li");
     emptyLi.className = "empty-list";
     emptyLi.textContent = I18n.t("emptyKeysList");
@@ -576,16 +612,28 @@ function renderKeys(keys) {
   }
 
   const locale = I18n.lang === "zh" ? "zh-CN" : "en-US";
-  for (const k of keys) {
+  for (const k of filteredKeys) {
+    const isTotp = k.key_type === "totp";
     const li = document.createElement("li");
     li.className = "key-item";
 
     const info = document.createElement("div");
     info.className = "key-info";
 
+    const titleRow = document.createElement("div");
+    titleRow.className = "key-title-row";
+
     const name = document.createElement("span");
     name.className = "key-title";
     name.textContent = k.name;
+    titleRow.appendChild(name);
+
+    if (isTotp) {
+      const badge = document.createElement("span");
+      badge.className = "badge badge-totp";
+      badge.textContent = I18n.t("badgeTotp");
+      titleRow.appendChild(badge);
+    }
 
     const date = document.createElement("span");
     date.className = "key-date";
@@ -593,16 +641,16 @@ function renderKeys(keys) {
       date: new Date(k.updated_at).toLocaleString(locale),
     });
 
-    info.appendChild(name);
+    info.appendChild(titleRow);
     info.appendChild(date);
 
     const actions = document.createElement("div");
     actions.className = "key-actions";
 
     const btnCopy = document.createElement("button");
-    btnCopy.className = "btn btn-primary btn-sm";
-    btnCopy.textContent = I18n.t("btnCopyKey");
-    btnCopy.addEventListener("click", () => copySingleKey(k.id, k.name));
+    btnCopy.className = isTotp ? "btn btn-primary btn-sm btn-totp-copy" : "btn btn-primary btn-sm";
+    btnCopy.textContent = isTotp ? I18n.t("btnCopyTotp") : I18n.t("btnCopyKey");
+    btnCopy.addEventListener("click", () => copySingleKey(k.id, k.name, k.key_type));
 
     const btnDelete = document.createElement("button");
     btnDelete.className = "btn btn-danger btn-sm";
@@ -618,10 +666,12 @@ function renderKeys(keys) {
   }
 }
 
-// Single-Key Retrieval & Direct Clipboard Decryption
+// Single-Key Retrieval & Direct Clipboard Decryption (or 6-Digit TOTP Code Generation)
 // Uses writeViaPromise so browser preserves transient user activation across WebAuthn + retrieve fetch
-async function copySingleKey(keyId, keyName) {
+async function copySingleKey(keyId, keyName, keyType = "secret") {
   hideAlert(els.keysAlert);
+  let totpRemainingSec = null;
+  let resolvedAsTotp = keyType === "totp";
   try {
     const keyBlobPromise = (async () => {
       // 1. Step-up Challenge
@@ -652,6 +702,10 @@ async function copySingleKey(keyId, keyName) {
       const keyData = await retRes.json();
       if (!retRes.ok) throw new Error(keyData.message || keyData.error);
 
+      if (keyData.key_type === "totp") {
+        resolvedAsTotp = true;
+      }
+
       // 4. Derive Passkey-KEK & Unwrap MEK
       const passkeyKek = await getOrDerivePasskeyKek(assertion, prfSaltBytes, false);
 
@@ -675,6 +729,11 @@ async function copySingleKey(keyId, keyName) {
       CryptoUtils.zeroBuffer(rawMek);
 
       try {
+        if (resolvedAsTotp) {
+          const totp = await TOTPUtils.generateTotpFromBytes(plaintextBytes);
+          totpRemainingSec = totp.remainingSeconds;
+          return new Blob([totp.code], { type: "text/plain" });
+        }
         return new Blob([plaintextBytes], { type: "text/plain" });
       } finally {
         CryptoUtils.zeroBuffer(plaintextBytes);
@@ -682,7 +741,15 @@ async function copySingleKey(keyId, keyName) {
     })();
 
     await ClipboardGuard.writeViaPromise(keyBlobPromise, "copied");
-    showAlert(els.keysAlert, I18n.t("keyCopiedAlert", { name: keyName }), "success");
+    if (resolvedAsTotp) {
+      showAlert(
+        els.keysAlert,
+        I18n.t("totpCopiedAlert", { name: keyName, sec: totpRemainingSec || 30 }),
+        "success"
+      );
+    } else {
+      showAlert(els.keysAlert, I18n.t("keyCopiedAlert", { name: keyName }), "success");
+    }
   } catch (err) {
     showAlert(els.keysAlert, I18n.t("keyCopyFailed", { err: err.message }));
   }
@@ -721,12 +788,15 @@ async function deleteKey(keyId, keyName) {
   }
 }
 
-// ===================== 3-Mode Key Creation =====================
+// ===================== 4-Mode Key & TOTP Creation =====================
 
-let activeMode = "type"; // "type" | "paste" | "gen"
+let activeMode = "type"; // "type" | "paste" | "gen" | "totp"
 
 els.btnOpenCreateKey.addEventListener("click", () => {
   resetCreateKeyModal();
+  if (state.selectedTypeFilter === "totp") {
+    switchMode("totp");
+  }
   els.modalCreateKey.style.display = "flex";
 });
 
@@ -748,34 +818,163 @@ function updatePasteBadgeCopy() {
   }
 }
 
+function updateTotpBadgeCopy() {
+  if (!els.totpStatusBadge) return;
+  if (state.pendingTotpBytes && state.pendingTotpBytes.length > 0 && state.pendingTotpMeta) {
+    els.totpStatusBadge.textContent = I18n.t("totpStatusCaptured", {
+      digits: state.pendingTotpMeta.digits,
+      period: state.pendingTotpMeta.period,
+    });
+    els.totpStatusBadge.className = "badge badge-success";
+  } else {
+    els.totpStatusBadge.textContent = I18n.t("totpStatusEmpty");
+    els.totpStatusBadge.className = "badge badge-neutral";
+  }
+  if (els.btnTotpCameraLabel) {
+    els.btnTotpCameraLabel.textContent = TOTPUtils.isCameraActive()
+      ? I18n.t("btnTotpStopCamera")
+      : I18n.t("btnTotpScanCamera");
+  }
+}
+
+function stopTotpCameraUI() {
+  TOTPUtils.stopCameraScanner();
+  if (els.totpCameraBox) els.totpCameraBox.style.display = "none";
+  if (els.btnTotpCameraLabel) {
+    els.btnTotpCameraLabel.textContent = I18n.t("btnTotpScanCamera");
+  }
+}
+
+function captureTotpInput(rawText, fromQr = false) {
+  const parsed = TOTPUtils.parseTotpInput(rawText);
+  if (state.pendingTotpBytes) {
+    CryptoUtils.zeroBuffer(state.pendingTotpBytes);
+  }
+  state.pendingTotpBytes = new TextEncoder().encode(parsed.canonicalUri);
+  state.pendingTotpMeta = {
+    digits: parsed.digits,
+    period: parsed.period,
+  };
+  if (parsed.suggestedName && !els.keyName.value.trim()) {
+    els.keyName.value = parsed.suggestedName;
+  }
+  if (els.totpSeedInput) {
+    els.totpSeedInput.value = "";
+  }
+  updateTotpBadgeCopy();
+  if (fromQr) {
+    showAlert(els.createKeyAlert, I18n.t("totpQrScanSuccess"), "success");
+  } else {
+    hideAlert(els.createKeyAlert);
+  }
+}
+
 function resetCreateKeyModal() {
   hideAlert(els.createKeyAlert);
+  stopTotpCameraUI();
   els.keyName.value = "";
   els.keyTypePrimary.value = "";
   els.keyTypeConfirm.value = "";
+  if (els.totpSeedInput) els.totpSeedInput.value = "";
+  if (els.totpQrFile) els.totpQrFile.value = "";
   if (state.pendingPastedBytes) {
     CryptoUtils.zeroBuffer(state.pendingPastedBytes);
     state.pendingPastedBytes = null;
   }
+  if (state.pendingTotpBytes) {
+    CryptoUtils.zeroBuffer(state.pendingTotpBytes);
+    state.pendingTotpBytes = null;
+  }
+  state.pendingTotpMeta = null;
   updatePasteBadgeCopy();
+  updateTotpBadgeCopy();
   switchMode("type");
 }
 
 function switchMode(mode) {
   activeMode = mode;
   hideAlert(els.createKeyAlert);
+  if (mode !== "totp") {
+    stopTotpCameraUI();
+  }
   els.tabType.className = mode === "type" ? "tab active" : "tab";
   els.tabPaste.className = mode === "paste" ? "tab active" : "tab";
   els.tabGen.className = mode === "gen" ? "tab active" : "tab";
+  if (els.tabTotp) els.tabTotp.className = mode === "totp" ? "tab active" : "tab";
 
   els.sectionType.style.display = mode === "type" ? "block" : "none";
   els.sectionPaste.style.display = mode === "paste" ? "block" : "none";
   els.sectionGen.style.display = mode === "gen" ? "block" : "none";
+  if (els.sectionTotp) els.sectionTotp.style.display = mode === "totp" ? "block" : "none";
 }
 
 els.tabType.addEventListener("click", () => switchMode("type"));
 els.tabPaste.addEventListener("click", () => switchMode("paste"));
 els.tabGen.addEventListener("click", () => switchMode("gen"));
+if (els.tabTotp) els.tabTotp.addEventListener("click", () => switchMode("totp"));
+
+// TOTP Camera Scanner & QR Image Upload
+if (els.btnTotpCamera) {
+  els.btnTotpCamera.addEventListener("click", async () => {
+    hideAlert(els.createKeyAlert);
+    if (TOTPUtils.isCameraActive()) {
+      stopTotpCameraUI();
+      return;
+    }
+    try {
+      els.totpCameraBox.style.display = "block";
+      els.btnTotpCameraLabel.textContent = I18n.t("btnTotpStopCamera");
+      await TOTPUtils.startCameraScanner(
+        els.totpQrVideo,
+        (decodedText) => {
+          stopTotpCameraUI();
+          try {
+            captureTotpInput(decodedText, true);
+          } catch (err) {
+            showAlert(els.createKeyAlert, err.message);
+          }
+        },
+        () => {}
+      );
+    } catch (err) {
+      stopTotpCameraUI();
+      showAlert(els.createKeyAlert, err.message);
+    }
+  });
+}
+
+if (els.btnTotpUpload && els.totpQrFile) {
+  els.btnTotpUpload.addEventListener("click", () => {
+    els.totpQrFile.click();
+  });
+  els.totpQrFile.addEventListener("change", async () => {
+    const file = els.totpQrFile.files && els.totpQrFile.files[0];
+    els.totpQrFile.value = "";
+    if (!file) return;
+    hideAlert(els.createKeyAlert);
+    try {
+      const decodedText = await TOTPUtils.decodeQrFromFile(file);
+      captureTotpInput(decodedText, true);
+    } catch (err) {
+      showAlert(els.createKeyAlert, err.message);
+    }
+  });
+}
+
+if (els.totpSeedInput) {
+  els.totpSeedInput.addEventListener("paste", (e) => {
+    const text = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
+    if (text && text.trim()) {
+      e.preventDefault();
+      try {
+        captureTotpInput(text, false);
+        ClipboardGuard.scheduleClear(180 * 1000, "pasted");
+      } catch (err) {
+        showAlert(els.createKeyAlert, err.message);
+      }
+    }
+  });
+}
 
 // Block pasting on Confirm Input so user actually types twice
 els.keyTypeConfirm.addEventListener("paste", (e) => {
@@ -848,10 +1047,23 @@ els.btnPasteCapture.addEventListener("click", async () => {
 });
 
 window.addEventListener("paste", async (e) => {
-  if (els.modalCreateKey.style.display === "flex" && activeMode === "paste") {
-    e.preventDefault();
-    const text = e.clipboardData.getData("text/plain");
-    await capturePasteDirect(text);
+  if (els.modalCreateKey.style.display === "flex") {
+    if (activeMode === "paste") {
+      e.preventDefault();
+      const text = e.clipboardData.getData("text/plain");
+      await capturePasteDirect(text);
+    } else if (activeMode === "totp") {
+      const files = e.clipboardData && e.clipboardData.files;
+      if (files && files.length > 0 && files[0].type.startsWith("image/")) {
+        e.preventDefault();
+        try {
+          const decodedText = await TOTPUtils.decodeQrFromFile(files[0]);
+          captureTotpInput(decodedText, true);
+        } catch (err) {
+          showAlert(els.createKeyAlert, err.message);
+        }
+      }
+    }
   }
 });
 
@@ -862,6 +1074,16 @@ els.genLength.addEventListener("input", () => {
 // Submit Create Key
 els.btnSaveKey.addEventListener("click", async () => {
   hideAlert(els.createKeyAlert);
+  // If user is in TOTP mode and scanned QR / typed seed with a suggested name before filling keyName
+  if (activeMode === "totp" && els.totpSeedInput && els.totpSeedInput.value.trim()) {
+    try {
+      captureTotpInput(els.totpSeedInput.value.trim(), false);
+    } catch (err) {
+      showAlert(els.createKeyAlert, err.message);
+      return;
+    }
+  }
+
   const name = els.keyName.value.trim();
   if (!name) {
     showAlert(els.createKeyAlert, I18n.t("keyNameRequiredAlert"));
@@ -870,6 +1092,7 @@ els.btnSaveKey.addEventListener("click", async () => {
 
   let plaintextBytes = null;
   let genClipboardBytes = null;
+  const isTotpKey = activeMode === "totp";
 
   try {
     if (activeMode === "type") {
@@ -939,6 +1162,14 @@ els.btnSaveKey.addEventListener("click", async () => {
         genClipboardBytes = new Uint8Array(plaintextBytes.length);
         genClipboardBytes.set(plaintextBytes);
       }
+    } else if (activeMode === "totp") {
+      if (!state.pendingTotpBytes || state.pendingTotpBytes.length === 0) {
+        showAlert(els.createKeyAlert, I18n.t("totpStatusEmpty"));
+        return;
+      }
+      plaintextBytes = state.pendingTotpBytes;
+      state.pendingTotpBytes = null;
+      state.pendingTotpMeta = null;
     }
 
     if (!plaintextBytes || plaintextBytes.length === 0) {
@@ -987,6 +1218,7 @@ els.btnSaveKey.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: name,
+        key_type: isTotpKey ? "totp" : "secret",
         client_ciphertext: CryptoUtils.bytesToBase64Url(clientCiphertext),
         client_iv: CryptoUtils.bytesToBase64Url(clientIv),
         client_salt: CryptoUtils.bytesToBase64Url(clientSalt),
@@ -1003,8 +1235,12 @@ els.btnSaveKey.addEventListener("click", async () => {
 
     resetCreateKeyModal();
     els.modalCreateKey.style.display = "none";
-    showAlert(els.keysAlert, I18n.t("keySavedAlert", { name }), "success");
-    loadKeys();
+    showAlert(
+      els.keysAlert,
+      I18n.t(isTotpKey ? "totpSavedAlert" : "keySavedAlert", { name }),
+      "success"
+    );
+    loadKeys(els.keysFilter.value);
   } catch (err) {
     if (plaintextBytes) CryptoUtils.zeroBuffer(plaintextBytes);
     if (genClipboardBytes) CryptoUtils.zeroBuffer(genClipboardBytes);

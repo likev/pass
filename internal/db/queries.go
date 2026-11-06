@@ -56,6 +56,7 @@ type Key struct {
 	UserID           string    `json:"user_id"`
 	Name             string    `json:"name"`
 	NameNormalized   string    `json:"name_normalized"`
+	KeyType          string    `json:"key_type"`
 	ServerCiphertext []byte    `json:"server_ciphertext"`
 	ServerIV         []byte    `json:"server_iv"`
 	ServerSalt       []byte    `json:"server_salt"`
@@ -69,6 +70,7 @@ type Key struct {
 type KeyMetadata struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
+	KeyType   string    `json:"key_type"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -403,12 +405,16 @@ func (d *DB) ExpireOldDeviceRequests(ctx context.Context) error {
 
 func (d *DB) CreateKey(ctx context.Context, k *Key) error {
 	ctx = ensureCtx(ctx)
+	keyType := k.KeyType
+	if keyType == "" {
+		keyType = "secret"
+	}
 	_, err := d.ExecContext(ctx,
 		`INSERT INTO keys (
-			id, user_id, name, name_normalized, server_ciphertext,
+			id, user_id, name, name_normalized, key_type, server_ciphertext,
 			server_iv, server_salt, client_iv, client_salt, creator_ip, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-		k.ID, k.UserID, k.Name, k.NameNormalized, k.ServerCiphertext,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		k.ID, k.UserID, k.Name, k.NameNormalized, keyType, k.ServerCiphertext,
 		k.ServerIV, k.ServerSalt, k.ClientIV, k.ClientSalt, k.CreatorIP,
 	)
 	return err
@@ -441,7 +447,7 @@ func (d *DB) ListKeysMetadata(ctx context.Context, userID, query string) ([]KeyM
 	likePattern := "%" + escapeLikePattern(normQuery) + "%"
 
 	rows, err := d.QueryContext(ctx,
-		`SELECT id, name, created_at, updated_at
+		`SELECT id, name, COALESCE(NULLIF(key_type, ''), 'secret'), created_at, updated_at
 		FROM keys
 		WHERE user_id = ? AND name_normalized LIKE ? ESCAPE '\'
 		ORDER BY name_normalized ASC
@@ -454,7 +460,7 @@ func (d *DB) ListKeysMetadata(ctx context.Context, userID, query string) ([]KeyM
 	keys := make([]KeyMetadata, 0)
 	for rows.Next() {
 		var km KeyMetadata
-		if err := rows.Scan(&km.ID, &km.Name, &km.CreatedAt, &km.UpdatedAt); err != nil {
+		if err := rows.Scan(&km.ID, &km.Name, &km.KeyType, &km.CreatedAt, &km.UpdatedAt); err != nil {
 			return nil, err
 		}
 		keys = append(keys, km)
@@ -465,13 +471,13 @@ func (d *DB) ListKeysMetadata(ctx context.Context, userID, query string) ([]KeyM
 func (d *DB) GetKeyByID(ctx context.Context, id, userID string) (*Key, error) {
 	ctx = ensureCtx(ctx)
 	row := d.QueryRowContext(ctx,
-		`SELECT id, user_id, name, name_normalized, server_ciphertext,
+		`SELECT id, user_id, name, name_normalized, COALESCE(NULLIF(key_type, ''), 'secret'), server_ciphertext,
 			server_iv, server_salt, client_iv, client_salt, creator_ip, created_at, updated_at
 		FROM keys WHERE id = ? AND user_id = ?`, id, userID)
 	var k Key
 	var creatorIP sql.NullString
 	if err := row.Scan(
-		&k.ID, &k.UserID, &k.Name, &k.NameNormalized, &k.ServerCiphertext,
+		&k.ID, &k.UserID, &k.Name, &k.NameNormalized, &k.KeyType, &k.ServerCiphertext,
 		&k.ServerIV, &k.ServerSalt, &k.ClientIV, &k.ClientSalt, &creatorIP, &k.CreatedAt, &k.UpdatedAt,
 	); err != nil {
 		return nil, err

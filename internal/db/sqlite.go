@@ -66,8 +66,9 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to run database migration: %w", err)
 	}
 
-	// Ensure creator_ip column, index, and triggers exist for upgraded databases
+	// Ensure creator_ip and key_type columns, index, and triggers exist for upgraded databases
 	_, _ = db.ExecContext(ctx, `ALTER TABLE keys ADD COLUMN creator_ip TEXT;`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE keys ADD COLUMN key_type TEXT NOT NULL DEFAULT 'secret';`)
 	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_keys_creator_ip ON keys(creator_ip);`)
 	_, _ = db.ExecContext(ctx, `
 CREATE TRIGGER IF NOT EXISTS trg_keys_user_limit

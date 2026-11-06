@@ -142,7 +142,12 @@
         <div class="dashboard-toolbar">
           <div class="search-box">
             <span class="search-icon" aria-hidden="true">🔍</span>
-            <input type="text" id="keys-filter" class="form-control search-input" placeholder="Filter keys by name (metadata only)..." data-i18n-placeholder="keysFilterPlaceholder">
+            <input type="text" id="keys-filter" class="form-control search-input" placeholder="Filter keys & TOTP by name (metadata only)..." data-i18n-placeholder="keysFilterPlaceholder">
+          </div>
+          <div class="type-filter-group" role="group" aria-label="Key Type Filter">
+            <button id="filter-type-all" type="button" class="filter-pill active" data-i18n="filterTypeAll">All</button>
+            <button id="filter-type-secret" type="button" class="filter-pill" data-i18n="filterTypeSecret">Keys</button>
+            <button id="filter-type-totp" type="button" class="filter-pill" data-i18n="filterTypeTotp">2FA TOTP</button>
           </div>
           <button id="btn-open-create-key" class="btn btn-primary" data-i18n="btnCreateNewKey">+ Create New Key</button>
         </div>
@@ -176,11 +181,12 @@
           <input type="text" id="key-name" class="form-control" placeholder="my-service-key" data-i18n-placeholder="keyNamePlaceholder" spellcheck="false">
         </div>
 
-        <!-- 3-Mode Selection Tabs -->
-        <div class="tabs-nav">
+        <!-- 4-Mode Selection Tabs -->
+        <div class="tabs-nav tabs-nav-4">
           <button id="tab-type" class="tab active" data-i18n="tabType">1. Type Manually</button>
           <button id="tab-paste" class="tab" data-i18n="tabPaste">2. Paste Key</button>
           <button id="tab-gen" class="tab" data-i18n="tabGen">3. Auto-Generate</button>
+          <button id="tab-totp" class="tab" data-i18n="tabTotp">4. TOTP / 2FA QR</button>
         </div>
 
         <!-- Mode A: Type Twice -->
@@ -233,6 +239,37 @@
               <input type="checkbox" id="gen-copy-checkbox" checked>
               <span data-i18n="genCopyCheckboxLabel">Also copy generated key to clipboard (auto-clears in 3 minutes)</span>
             </label>
+          </div>
+        </div>
+
+        <!-- Mode D: TOTP / 2FA QR Seed -->
+        <div id="section-totp" class="tab-pane" style="display: none;">
+          <p class="text-muted small mode-hint" data-i18n="modeTotpHint">Scan a 2FA QR code with your camera, upload/paste a QR screenshot, or enter a Base32 setup key. The TOTP seed is E2EE encrypted and generates 6-digit codes on demand.</p>
+
+          <div class="totp-scan-actions">
+            <button id="btn-totp-camera" type="button" class="btn btn-secondary btn-sm">
+              <span aria-hidden="true">📷</span>
+              <span id="btn-totp-camera-label" data-i18n="btnTotpScanCamera">Scan QR with Camera</span>
+            </button>
+            <button id="btn-totp-upload" type="button" class="btn btn-secondary btn-sm">
+              <span aria-hidden="true">🖼️</span>
+              <span data-i18n="btnTotpUploadQr">Upload QR Image</span>
+            </button>
+            <input type="file" id="totp-qr-file" accept="image/*" style="display: none;">
+          </div>
+
+          <div id="totp-camera-box" class="totp-camera-box" style="display: none;">
+            <video id="totp-qr-video" class="totp-qr-video" muted playsinline></video>
+            <div class="totp-camera-overlay" data-i18n="totpCameraAimHint">Point camera at 2FA QR code...</div>
+          </div>
+
+          <div class="paste-box totp-status-box">
+            <span id="totp-status-badge" class="badge badge-neutral" data-i18n="totpStatusEmpty">No TOTP seed captured yet.</span>
+          </div>
+
+          <div class="form-group" style="margin-top: 0.65rem;">
+            <label for="totp-seed-input" data-i18n="totpManualLabel">Or Enter Setup Key (Base32) / otpauth:// URI</label>
+            <input type="password" id="totp-seed-input" class="form-control masked-input" placeholder="JBSWY3DPEHPK3PXP or otpauth://totp/..." data-i18n-placeholder="totpManualPlaceholder" autocomplete="off" spellcheck="false">
           </div>
         </div>
 
