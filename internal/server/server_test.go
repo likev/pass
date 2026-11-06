@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -495,5 +497,232 @@ func TestRateLimiting(t *testing.T) {
 	// 4th request MUST be 429 Too Many Requests
 	if code := makeReq(); code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 Too Many Requests on 4th call, got %d", code)
+	}
+}
+
+func TestKeyCreationLimits(t *testing.T) {
+	_, handler, database, sealMgr, sessionMgr, tempDir := setupTestServer(t)
+	defer os.RemoveAll(tempDir)
+	defer database.Close()
+
+	if err := sealMgr.InitSMK("my-secure-startup-passphrase-1234"); err != nil {
+		t.Fatalf("InitSMK failed: %v", err)
+	}
+
+	ctx := context.Background()
+	userID := uuid.NewString()
+	username := "limituser"
+	if err := database.CreateUser(ctx, userID, username, "Limit User"); err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	session, err := sessionMgr.CreateSession(userID, []byte("cred-id"))
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	// 1. Key payload exceeding 10KB (10,240 bytes) is rejected with 400 and key_payload_too_large
+	largeCiphertext := make([]byte, 10*1024+1)
+	largePayload := map[string]any{
+		"name":              "too-large-key",
+		"client_ciphertext": base64.RawURLEncoding.EncodeToString(largeCiphertext),
+		"client_iv":         base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		"client_salt":       base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	}
+	bodyBytes, _ := json.Marshal(largePayload)
+
+	req := httptest.NewRequest("POST", "/api/v1/keys", bytes.NewBuffer(bodyBytes))
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session.ID})
+	req.Header.Set("X-CSRF-Token", session.CSRFToken)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for oversized key, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp map[string]string
+	_ = json.Unmarshal(w.Body.Bytes(), &errResp)
+	if errResp["error"] != "key_payload_too_large" {
+		t.Fatalf("expected error key_payload_too_large, got %+v", errResp)
+	}
+
+	// 2. Per-user key limit (1000 keys)
+	// Pre-seed 1000 keys for userID in a single transaction
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx failed: %v", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO keys (
+		id, user_id, name, name_normalized, server_ciphertext,
+		server_iv, server_salt, client_iv, client_salt, creator_ip, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatalf("PrepareContext failed: %v", err)
+	}
+	for i := 0; i < 1000; i++ {
+		kID := fmt.Sprintf("lim-k-%04d", i)
+		kName := fmt.Sprintf("lim-key-%04d", i)
+		_, err := stmt.ExecContext(ctx, kID, userID, kName, strings.ToLower(kName), []byte("ct"), make([]byte, 12), make([]byte, 32), make([]byte, 12), make([]byte, 32), "192.0.2.1")
+		if err != nil {
+			t.Fatalf("insert failed: %v", err)
+		}
+	}
+	stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+
+	validPayload := map[string]any{
+		"name":              "valid-size-key-overflow",
+		"client_ciphertext": base64.RawURLEncoding.EncodeToString([]byte("safe-payload")),
+		"client_iv":         base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		"client_salt":       base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	}
+	validBytes, _ := json.Marshal(validPayload)
+
+	reqUserLimit := httptest.NewRequest("POST", "/api/v1/keys", bytes.NewBuffer(validBytes))
+	reqUserLimit.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session.ID})
+	reqUserLimit.Header.Set("X-CSRF-Token", session.CSRFToken)
+	wUserLimit := httptest.NewRecorder()
+	handler.ServeHTTP(wUserLimit, reqUserLimit)
+
+	if wUserLimit.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for user key limit, got %d: %s", wUserLimit.Code, wUserLimit.Body.String())
+	}
+	var userErrResp map[string]string
+	_ = json.Unmarshal(wUserLimit.Body.Bytes(), &userErrResp)
+	if userErrResp["error"] != "user_key_limit_exceeded" {
+		t.Fatalf("expected error user_key_limit_exceeded, got %+v", userErrResp)
+	}
+
+	// 3. Per-IP key limit (10,000 keys)
+	// Create a new user with 0 keys
+	user2ID := uuid.NewString()
+	_ = database.CreateUser(ctx, user2ID, "user2ip", "User 2 IP")
+	session2, _ := sessionMgr.CreateSession(user2ID, []byte("cred2-id"))
+
+	// Pre-seed 10,000 keys for IP "203.0.113.55"
+	targetIP := "203.0.113.55"
+	txIP, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx failed: %v", err)
+	}
+	for u := 0; u < 11; u++ {
+		dummyUID := fmt.Sprintf("dummy-u-%d", u)
+		_, _ = txIP.ExecContext(ctx, `INSERT INTO users (id, username, display_name) VALUES (?, ?, ?)`, dummyUID, dummyUID, dummyUID)
+	}
+	stmtIP, err := txIP.PrepareContext(ctx, `INSERT INTO keys (
+		id, user_id, name, name_normalized, server_ciphertext,
+		server_iv, server_salt, client_iv, client_salt, creator_ip, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatalf("PrepareContext failed: %v", err)
+	}
+	for i := 0; i < 10000; i++ {
+		dummyUID := fmt.Sprintf("dummy-u-%d", i/950)
+		kID := fmt.Sprintf("ip10k-%05d", i)
+		kName := fmt.Sprintf("ip10k-%05d", i)
+		_, err := stmtIP.ExecContext(ctx, kID, dummyUID, kName, strings.ToLower(kName), []byte("ct"), make([]byte, 12), make([]byte, 32), make([]byte, 12), make([]byte, 32), targetIP)
+		if err != nil {
+			t.Fatalf("insert IP key failed: %v", err)
+		}
+	}
+	stmtIP.Close()
+	if err := txIP.Commit(); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+
+	// Attempt to create key from targetIP via X-Forwarded-For header
+	reqIPLimit := httptest.NewRequest("POST", "/api/v1/keys", bytes.NewBuffer(validBytes))
+	reqIPLimit.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session2.ID})
+	reqIPLimit.Header.Set("X-CSRF-Token", session2.CSRFToken)
+	reqIPLimit.Header.Set("X-Forwarded-For", targetIP)
+	wIPLimit := httptest.NewRecorder()
+	handler.ServeHTTP(wIPLimit, reqIPLimit)
+
+	if wIPLimit.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for IP key limit, got %d: %s", wIPLimit.Code, wIPLimit.Body.String())
+	}
+	var ipErrResp map[string]string
+	_ = json.Unmarshal(wIPLimit.Body.Bytes(), &ipErrResp)
+	if ipErrResp["error"] != "ip_key_limit_exceeded" {
+		t.Fatalf("expected error ip_key_limit_exceeded, got %+v", ipErrResp)
+	}
+
+	// Same user from a different IP succeeds
+	reqDifferentIP := httptest.NewRequest("POST", "/api/v1/keys", bytes.NewBuffer(validBytes))
+	reqDifferentIP.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session2.ID})
+	reqDifferentIP.Header.Set("X-CSRF-Token", session2.CSRFToken)
+	reqDifferentIP.Header.Set("X-Forwarded-For", "203.0.113.56")
+	wDifferentIP := httptest.NewRecorder()
+	handler.ServeHTTP(wDifferentIP, reqDifferentIP)
+
+	if wDifferentIP.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for different IP, got %d: %s", wDifferentIP.Code, wDifferentIP.Body.String())
+	}
+
+	// 4. Malformed X-Forwarded-For fallback:
+	// A request with malformed X-Forwarded-For (e.g. commas/spaces) must fall back to RemoteAddr
+	reqMalformedXFF := httptest.NewRequest("POST", "/api/v1/keys", bytes.NewBuffer(validBytes))
+	reqMalformedXFF.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session2.ID})
+	reqMalformedXFF.Header.Set("X-CSRF-Token", session2.CSRFToken)
+	reqMalformedXFF.Header.Set("X-Forwarded-For", "  ,  ,  ")
+	reqMalformedXFF.RemoteAddr = targetIP + ":45678" // Points to targetIP which is maxed out
+	wMalformedXFF := httptest.NewRecorder()
+	handler.ServeHTTP(wMalformedXFF, reqMalformedXFF)
+
+	if wMalformedXFF.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request when falling back to maxed out RemoteAddr, got %d", wMalformedXFF.Code)
+	}
+	var malformedResp map[string]string
+	_ = json.Unmarshal(wMalformedXFF.Body.Bytes(), &malformedResp)
+	if malformedResp["error"] != "ip_key_limit_exceeded" {
+		t.Fatalf("expected ip_key_limit_exceeded on fallback, got %+v", malformedResp)
+	}
+
+	// 5. Update key with >10KB payload returns 400 key_payload_too_large
+	// Create a valid key to update
+	newKeyPayload := map[string]any{
+		"name":              "key-for-update-test",
+		"client_ciphertext": base64.RawURLEncoding.EncodeToString([]byte("safe-payload")),
+		"client_iv":         base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		"client_salt":       base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	}
+	newKeyBytes, _ := json.Marshal(newKeyPayload)
+	reqCreate := httptest.NewRequest("POST", "/api/v1/keys", bytes.NewBuffer(newKeyBytes))
+	reqCreate.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session2.ID})
+	reqCreate.Header.Set("X-CSRF-Token", session2.CSRFToken)
+	reqCreate.Header.Set("X-Forwarded-For", "203.0.113.99")
+	wCreate := httptest.NewRecorder()
+	handler.ServeHTTP(wCreate, reqCreate)
+	if wCreate.Code != http.StatusOK {
+		t.Fatalf("create key for update test failed: %d %s", wCreate.Code, wCreate.Body.String())
+	}
+	var createResp map[string]any
+	_ = json.Unmarshal(wCreate.Body.Bytes(), &createResp)
+	createdKeyID := createResp["id"].(string)
+
+	updateOversized := map[string]any{
+		"name":              "updated-name",
+		"client_ciphertext": base64.RawURLEncoding.EncodeToString(make([]byte, keys.MaxKeySizeBytes+1)),
+		"client_iv":         base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		"client_salt":       base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		"stepUpID":          "test-stepup",
+		"assertion":         map[string]any{},
+	}
+	upBytes, _ := json.Marshal(updateOversized)
+	reqUp := httptest.NewRequest("PUT", "/api/v1/keys/"+createdKeyID, bytes.NewBuffer(upBytes))
+	reqUp.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session2.ID})
+	reqUp.Header.Set("X-CSRF-Token", session2.CSRFToken)
+	wUp := httptest.NewRecorder()
+	handler.ServeHTTP(wUp, reqUp)
+
+	if wUp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for oversized key update, got %d: %s", wUp.Code, wUp.Body.String())
+	}
+	var upErrResp map[string]string
+	_ = json.Unmarshal(wUp.Body.Bytes(), &upErrResp)
+	if upErrResp["error"] != "key_payload_too_large" {
+		t.Fatalf("expected key_payload_too_large for update, got %+v", upErrResp)
 	}
 }

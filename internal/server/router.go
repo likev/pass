@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"time"
@@ -538,6 +539,18 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	meta, err := s.keySvc.CreateKey(r.Context(), sess.UserID, &payload, middleware.GetIP(r))
 	if err != nil {
+		if errors.Is(err, keys.ErrKeyPayloadTooLarge) {
+			writeError(w, http.StatusBadRequest, "key_payload_too_large", err.Error())
+			return
+		}
+		if errors.Is(err, keys.ErrUserKeyLimitExceeded) {
+			writeError(w, http.StatusBadRequest, "user_key_limit_exceeded", err.Error())
+			return
+		}
+		if errors.Is(err, keys.ErrIPKeyLimitExceeded) {
+			writeError(w, http.StatusBadRequest, "ip_key_limit_exceeded", err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "create_key_failed", err.Error())
 		return
 	}
@@ -635,13 +648,25 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		cCT, err = base64.StdEncoding.DecodeString(body.ClientCiphertext)
 	}
+	if err != nil || len(cCT) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_client_ciphertext", "Invalid client_ciphertext")
+		return
+	}
 	cIV, err := base64.RawURLEncoding.DecodeString(body.ClientIV)
 	if err != nil {
 		cIV, err = base64.StdEncoding.DecodeString(body.ClientIV)
 	}
+	if err != nil || len(cIV) != 12 {
+		writeError(w, http.StatusBadRequest, "invalid_client_iv", "Invalid client_iv: must be 12 bytes")
+		return
+	}
 	cSalt, err := base64.RawURLEncoding.DecodeString(body.ClientSalt)
 	if err != nil {
 		cSalt, err = base64.StdEncoding.DecodeString(body.ClientSalt)
+	}
+	if err != nil || len(cSalt) != 32 {
+		writeError(w, http.StatusBadRequest, "invalid_client_salt", "Invalid client_salt: must be 32 bytes")
+		return
 	}
 
 	err = s.keySvc.UpdateKey(
@@ -657,6 +682,10 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 		middleware.GetIP(r),
 	)
 	if err != nil {
+		if errors.Is(err, keys.ErrKeyPayloadTooLarge) {
+			writeError(w, http.StatusBadRequest, "key_payload_too_large", err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "update_failed", err.Error())
 		return
 	}

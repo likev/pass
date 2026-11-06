@@ -6,6 +6,9 @@ import { CryptoUtils } from "./crypto.js";
 import { WebAuthnHelper } from "./webauthn.js";
 import { ClipboardGuard } from "./clipboard.js";
 
+// Key size limit: 10KB (10,240 bytes)
+const MAX_KEY_SIZE_BYTES = 10 * 1024;
+
 // Application State
 const state = {
   csrfToken: null,
@@ -619,6 +622,7 @@ function resetCreateKeyModal() {
 
 function switchMode(mode) {
   activeMode = mode;
+  hideAlert(els.createKeyAlert);
   els.tabType.className = mode === "type" ? "tab active" : "tab";
   els.tabPaste.className = mode === "paste" ? "tab active" : "tab";
   els.tabGen.className = mode === "gen" ? "tab active" : "tab";
@@ -639,6 +643,28 @@ els.keyTypeConfirm.addEventListener("paste", (e) => {
 });
 els.keyTypeConfirm.addEventListener("drop", (e) => e.preventDefault());
 
+// Validate typing length in real-time
+els.keyTypePrimary.addEventListener("input", () => {
+  const bytes = new TextEncoder().encode(els.keyTypePrimary.value);
+  if (bytes.length > MAX_KEY_SIZE_BYTES) {
+    showAlert(els.createKeyAlert, `Key size exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+  } else {
+    hideAlert(els.createKeyAlert);
+  }
+});
+
+els.keyTypeConfirm.addEventListener("input", () => {
+  const bytes = new TextEncoder().encode(els.keyTypeConfirm.value);
+  if (bytes.length > MAX_KEY_SIZE_BYTES) {
+    showAlert(els.createKeyAlert, `Key confirmation exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+  } else {
+    const primaryBytes = new TextEncoder().encode(els.keyTypePrimary.value);
+    if (primaryBytes.length <= MAX_KEY_SIZE_BYTES) {
+      hideAlert(els.createKeyAlert);
+    }
+  }
+});
+
 // Intercept paste on keyTypePrimary: switch to paste mode and capture directly into RAM
 els.keyTypePrimary.addEventListener("paste", async (e) => {
   e.preventDefault();
@@ -652,10 +678,21 @@ els.keyTypePrimary.addEventListener("paste", async (e) => {
 // Capture Pasted Key directly into memory & trigger 3-min clipboard auto-clear
 async function capturePasteDirect(text) {
   if (!text) return;
+  const encoded = new TextEncoder().encode(text);
+  if (encoded.length > MAX_KEY_SIZE_BYTES) {
+    if (state.pendingPastedBytes) {
+      CryptoUtils.zeroBuffer(state.pendingPastedBytes);
+      state.pendingPastedBytes = null;
+    }
+    els.pasteStatusBadge.textContent = "No pasted key captured yet.";
+    els.pasteStatusBadge.className = "badge badge-neutral";
+    showAlert(els.createKeyAlert, `Pasted key exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+    return;
+  }
   if (state.pendingPastedBytes) {
     CryptoUtils.zeroBuffer(state.pendingPastedBytes);
   }
-  state.pendingPastedBytes = new TextEncoder().encode(text);
+  state.pendingPastedBytes = encoded;
   els.pasteStatusBadge.textContent = `Pasted secret captured in memory (${state.pendingPastedBytes.length} bytes) — ready to encrypt`;
   els.pasteStatusBadge.className = "badge badge-success";
   // Activate 3-minute clear countdown because user pasted from clipboard
@@ -711,6 +748,13 @@ els.btnSaveKey.addEventListener("click", async () => {
       els.keyTypePrimary.value = "";
       els.keyTypeConfirm.value = "";
 
+      if (buf1.length > MAX_KEY_SIZE_BYTES || buf2.length > MAX_KEY_SIZE_BYTES) {
+        CryptoUtils.zeroBuffer(buf1);
+        CryptoUtils.zeroBuffer(buf2);
+        showAlert(els.createKeyAlert, `Key size exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        return;
+      }
+
       const match = CryptoUtils.constantTimeCompare(buf1, buf2);
       CryptoUtils.zeroBuffer(buf2);
 
@@ -725,18 +769,49 @@ els.btnSaveKey.addEventListener("click", async () => {
         showAlert(els.createKeyAlert, "No pasted key captured. Click 'Paste from Clipboard' first.");
         return;
       }
+      if (state.pendingPastedBytes.length > MAX_KEY_SIZE_BYTES) {
+        CryptoUtils.zeroBuffer(state.pendingPastedBytes);
+        state.pendingPastedBytes = null;
+        showAlert(els.createKeyAlert, `Pasted key exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        return;
+      }
       plaintextBytes = state.pendingPastedBytes;
       state.pendingPastedBytes = null;
     } else if (activeMode === "gen") {
       const mode = els.genPreset.value;
       const length = parseInt(els.genLength.value, 10);
+      if (isNaN(length) || length <= 0) {
+        showAlert(els.createKeyAlert, "Invalid key length.");
+        return;
+      }
+      if (length > MAX_KEY_SIZE_BYTES) {
+        showAlert(els.createKeyAlert, `Generated key length exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        return;
+      }
       plaintextBytes = CryptoUtils.generateSecureKey(mode, length);
+      if (plaintextBytes.length > MAX_KEY_SIZE_BYTES) {
+        CryptoUtils.zeroBuffer(plaintextBytes);
+        showAlert(els.createKeyAlert, `Generated key exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+        return;
+      }
 
       if (els.genCopyCheckbox.checked) {
         // Prepare defensive copy to write to clipboard ONLY after successful save
         genClipboardBytes = new Uint8Array(plaintextBytes.length);
         genClipboardBytes.set(plaintextBytes);
       }
+    }
+
+    if (!plaintextBytes || plaintextBytes.length === 0) {
+      showAlert(els.createKeyAlert, "Key payload is empty.");
+      return;
+    }
+
+    if (plaintextBytes.length > MAX_KEY_SIZE_BYTES) {
+      CryptoUtils.zeroBuffer(plaintextBytes);
+      if (genClipboardBytes) CryptoUtils.zeroBuffer(genClipboardBytes);
+      showAlert(els.createKeyAlert, `Key payload exceeds 10KB (${MAX_KEY_SIZE_BYTES} bytes) limit.`);
+      return;
     }
 
     // Step-up Passkey Prompt to unwrap MEK

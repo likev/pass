@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/google/uuid"
@@ -13,12 +14,36 @@ import (
 	"passmanager/internal/db"
 )
 
-var (
-	ErrKeyNotFound     = errors.New("key not found")
-	ErrDuplicateKey    = errors.New("a key with this name already exists")
-	ErrInvalidKeyData  = errors.New("invalid key payload data")
-	ErrRateLimitExceeded = errors.New("rate limit exceeded for single-key retrieval")
+const (
+	MaxKeySizeBytes = 10 * 1024 // 10KB (10,240 bytes)
+	MaxKeysPerUser  = 1000
+	MaxKeysPerIP    = 10000
 )
+
+var (
+	ErrKeyNotFound          = errors.New("key not found")
+	ErrDuplicateKey         = errors.New("a key with this name already exists")
+	ErrInvalidKeyData       = errors.New("invalid key payload data")
+	ErrRateLimitExceeded    = errors.New("rate limit exceeded for single-key retrieval")
+	ErrKeyPayloadTooLarge   = errors.New("key payload exceeds 10KB limit")
+	ErrUserKeyLimitExceeded = errors.New("per-user limit of 1000 keys exceeded")
+	ErrIPKeyLimitExceeded   = errors.New("per-IP limit of 10000 keys exceeded")
+)
+
+func cleanIP(ip string) string {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return "unknown"
+	}
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	ip = strings.Trim(ip, "[]")
+	if parsed := net.ParseIP(ip); parsed != nil {
+		return parsed.String()
+	}
+	return ip
+}
 
 type KeyService struct {
 	db       *db.DB
@@ -61,6 +86,9 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 	if err != nil || len(cCT) == 0 {
 		return nil, errors.New("invalid client_ciphertext")
 	}
+	if len(cCT) > MaxKeySizeBytes {
+		return nil, ErrKeyPayloadTooLarge
+	}
 
 	cIV, err := base64.RawURLEncoding.DecodeString(payload.ClientIV)
 	if err != nil {
@@ -76,6 +104,25 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 	}
 	if err != nil || len(cSalt) != 32 {
 		return nil, errors.New("invalid client_salt: must be 32 bytes")
+	}
+
+	// Enforce per-user limit: max 1,000 keys
+	userCount, err := ks.db.CountKeysByUserID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check user key limit: %w", err)
+	}
+	if userCount >= MaxKeysPerUser {
+		return nil, ErrUserKeyLimitExceeded
+	}
+
+	// Enforce per-IP limit: max 10,000 keys
+	creatorIP := cleanIP(ipAddr)
+	ipCount, err := ks.db.CountKeysByIP(ctx, creatorIP)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check IP key limit: %w", err)
+	}
+	if ipCount >= MaxKeysPerIP {
+		return nil, ErrIPKeyLimitExceeded
 	}
 
 	// Get unsealed SMK
@@ -107,11 +154,18 @@ func (ks *KeyService) CreateKey(ctx context.Context, userID string, payload *Cre
 		ServerSalt:       sSalt,
 		ClientIV:         cIV,
 		ClientSalt:       cSalt,
+		CreatorIP:        creatorIP,
 	}
 
 	if err := ks.db.CreateKey(ctx, record); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, ErrDuplicateKey
+		}
+		if strings.Contains(err.Error(), "per-user limit of 1000 keys exceeded") {
+			return nil, ErrUserKeyLimitExceeded
+		}
+		if strings.Contains(err.Error(), "per-IP limit of 10000 keys exceeded") {
+			return nil, ErrIPKeyLimitExceeded
 		}
 		return nil, fmt.Errorf("failed to save key: %w", err)
 	}
@@ -207,6 +261,16 @@ func (ks *KeyService) UpdateKey(
 	assertionBytes []byte,
 	ipAddr string,
 ) error {
+	if len(clientCT) == 0 {
+		return ErrInvalidKeyData
+	}
+	if len(clientCT) > MaxKeySizeBytes {
+		return ErrKeyPayloadTooLarge
+	}
+	if len(clientIV) != 12 || len(clientSalt) != 32 {
+		return ErrInvalidKeyData
+	}
+
 	if _, err := ks.authSvc.VerifyStepUp(ctx, stepUpID, assertionBytes); err != nil {
 		return fmt.Errorf("passkey step-up verification failed: %w", err)
 	}

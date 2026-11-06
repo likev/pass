@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,5 +177,68 @@ func TestDBLifecycle(t *testing.T) {
 	// 9. Audit log
 	if err := database.InsertAuditLog(ctx, &userID, "test_event", "127.0.0.1", "metadata"); err != nil {
 		t.Fatalf("InsertAuditLog failed: %v", err)
+	}
+
+	// 10. Key count queries
+	uCount, err := database.CountKeysByUserID(ctx, userID)
+	if err != nil || uCount != 1 {
+		t.Fatalf("expected CountKeysByUserID=1, got %d, err: %v", uCount, err)
+	}
+	ipKeyRecord := &Key{
+		ID:               uuid.NewString(),
+		UserID:           userID,
+		Name:             "ip-key",
+		NameNormalized:   "ip-key",
+		ServerCiphertext: []byte("ct"),
+		ServerIV:         make([]byte, 12),
+		ServerSalt:       make([]byte, 32),
+		ClientIV:         make([]byte, 12),
+		ClientSalt:       make([]byte, 32),
+		CreatorIP:        "198.51.100.99",
+	}
+	if err := database.CreateKey(ctx, ipKeyRecord); err != nil {
+		t.Fatalf("CreateKey with CreatorIP failed: %v", err)
+	}
+	ipCount, err := database.CountKeysByIP(ctx, "198.51.100.99")
+	if err != nil || ipCount != 1 {
+		t.Fatalf("expected CountKeysByIP=1, got %d, err: %v", ipCount, err)
+	}
+
+	// 11. Test that SQLite trigger enforces per-user limit at DB level
+	// User currently has 2 keys. Pre-seed up to 1000 keys.
+	for i := 2; i < 1000; i++ {
+		kID := fmt.Sprintf("trg-k-%04d", i)
+		kName := fmt.Sprintf("trg-key-%04d", i)
+		err := database.CreateKey(ctx, &Key{
+			ID:               kID,
+			UserID:           userID,
+			Name:             kName,
+			NameNormalized:   strings.ToLower(kName),
+			ServerCiphertext: []byte("ct"),
+			ServerIV:         make([]byte, 12),
+			ServerSalt:       make([]byte, 32),
+			ClientIV:         make([]byte, 12),
+			ClientSalt:       make([]byte, 32),
+			CreatorIP:        "198.51.100.99",
+		})
+		if err != nil {
+			t.Fatalf("bulk insert failed at %d: %v", i, err)
+		}
+	}
+	// The 1001st key must trigger SQLite abort
+	err = database.CreateKey(ctx, &Key{
+		ID:               "trg-overflow",
+		UserID:           userID,
+		Name:             "trg-overflow",
+		NameNormalized:   "trg-overflow",
+		ServerCiphertext: []byte("ct"),
+		ServerIV:         make([]byte, 12),
+		ServerSalt:       make([]byte, 32),
+		ClientIV:         make([]byte, 12),
+		ClientSalt:       make([]byte, 32),
+		CreatorIP:        "198.51.100.99",
+	})
+	if err == nil || !strings.Contains(err.Error(), "per-user limit of 1000 keys exceeded") {
+		t.Fatalf("expected SQLite trigger to reject 1001st key, got err: %v", err)
 	}
 }

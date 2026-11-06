@@ -66,5 +66,28 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to run database migration: %w", err)
 	}
 
+	// Ensure creator_ip column, index, and triggers exist for upgraded databases
+	_, _ = db.ExecContext(ctx, `ALTER TABLE keys ADD COLUMN creator_ip TEXT;`)
+	_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_keys_creator_ip ON keys(creator_ip);`)
+	_, _ = db.ExecContext(ctx, `
+CREATE TRIGGER IF NOT EXISTS trg_keys_user_limit
+BEFORE INSERT ON keys
+BEGIN
+    SELECT CASE
+        WHEN (SELECT COUNT(*) FROM keys WHERE user_id = NEW.user_id) >= 1000
+        THEN RAISE(ABORT, 'per-user limit of 1000 keys exceeded')
+    END;
+END;`)
+	_, _ = db.ExecContext(ctx, `
+CREATE TRIGGER IF NOT EXISTS trg_keys_ip_limit
+BEFORE INSERT ON keys
+WHEN NEW.creator_ip IS NOT NULL AND NEW.creator_ip != ''
+BEGIN
+    SELECT CASE
+        WHEN (SELECT COUNT(*) FROM keys WHERE creator_ip = NEW.creator_ip) >= 10000
+        THEN RAISE(ABORT, 'per-IP limit of 10000 keys exceeded')
+    END;
+END;`)
+
 	return &DB{DB: db, Path: dbPath}, nil
 }

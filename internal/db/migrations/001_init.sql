@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS keys (
     server_salt BLOB NOT NULL,
     client_iv BLOB NOT NULL,
     client_salt BLOB NOT NULL,
+    creator_ip TEXT,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, name_normalized),
@@ -69,6 +70,27 @@ CREATE TABLE IF NOT EXISTS keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_keys_user_name ON keys(user_id, name_normalized);
+CREATE INDEX IF NOT EXISTS idx_keys_creator_ip ON keys(creator_ip);
+
+-- Enforce per-user limit (1,000 keys) and per-IP limit (10,000 keys) triggers
+CREATE TRIGGER IF NOT EXISTS trg_keys_user_limit
+BEFORE INSERT ON keys
+BEGIN
+    SELECT CASE
+        WHEN (SELECT COUNT(*) FROM keys WHERE user_id = NEW.user_id) >= 1000
+        THEN RAISE(ABORT, 'per-user limit of 1000 keys exceeded')
+    END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_keys_ip_limit
+BEFORE INSERT ON keys
+WHEN NEW.creator_ip IS NOT NULL AND NEW.creator_ip != ''
+BEGIN
+    SELECT CASE
+        WHEN (SELECT COUNT(*) FROM keys WHERE creator_ip = NEW.creator_ip) >= 10000
+        THEN RAISE(ABORT, 'per-IP limit of 10000 keys exceeded')
+    END;
+END;
 
 -- 5. Audit & Backup Log Table
 CREATE TABLE IF NOT EXISTS audit_logs (

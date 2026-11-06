@@ -285,7 +285,7 @@ export const CryptoUtils = {
   // Generates unbiased random bytes directly into Uint8Array without DOM or string conversion
   generateSecureKey(mode = "password", length = 32) {
     if (length < 16) length = 16;
-    if (length > 128) length = 128;
+    if (length > 10240) length = 10240;
 
     const result = new Uint8Array(length);
 

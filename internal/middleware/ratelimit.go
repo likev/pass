@@ -53,13 +53,21 @@ func (rl *RateLimiter) cleanup() {
 func GetIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				if host, _, err := net.SplitHostPort(part); err == nil {
+					return host
+				}
+				return strings.Trim(part, "[]")
+			}
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
 	}
-	return r.RemoteAddr
+	return strings.Trim(strings.TrimSpace(r.RemoteAddr), "[]")
 }
 
 func (rl *RateLimiter) Limit(maxRequests int, window time.Duration, keyFunc func(*http.Request) string) func(http.Handler) http.Handler {

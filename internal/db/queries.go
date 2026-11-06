@@ -61,6 +61,7 @@ type Key struct {
 	ServerSalt       []byte    `json:"server_salt"`
 	ClientIV         []byte    `json:"client_iv"`
 	ClientSalt       []byte    `json:"client_salt"`
+	CreatorIP        string    `json:"creator_ip,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
@@ -356,12 +357,26 @@ func (d *DB) CreateKey(ctx context.Context, k *Key) error {
 	_, err := d.ExecContext(ctx,
 		`INSERT INTO keys (
 			id, user_id, name, name_normalized, server_ciphertext,
-			server_iv, server_salt, client_iv, client_salt, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+			server_iv, server_salt, client_iv, client_salt, creator_ip, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 		k.ID, k.UserID, k.Name, k.NameNormalized, k.ServerCiphertext,
-		k.ServerIV, k.ServerSalt, k.ClientIV, k.ClientSalt,
+		k.ServerIV, k.ServerSalt, k.ClientIV, k.ClientSalt, k.CreatorIP,
 	)
 	return err
+}
+
+func (d *DB) CountKeysByUserID(ctx context.Context, userID string) (int, error) {
+	ctx = ensureCtx(ctx)
+	var count int
+	err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM keys WHERE user_id = ?`, userID).Scan(&count)
+	return count, err
+}
+
+func (d *DB) CountKeysByIP(ctx context.Context, ip string) (int, error) {
+	ctx = ensureCtx(ctx)
+	var count int
+	err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM keys WHERE creator_ip = ?`, ip).Scan(&count)
+	return count, err
 }
 
 func (d *DB) ListKeysMetadata(ctx context.Context, userID, query string) ([]KeyMetadata, error) {
@@ -395,14 +410,18 @@ func (d *DB) GetKeyByID(ctx context.Context, id, userID string) (*Key, error) {
 	ctx = ensureCtx(ctx)
 	row := d.QueryRowContext(ctx,
 		`SELECT id, user_id, name, name_normalized, server_ciphertext,
-			server_iv, server_salt, client_iv, client_salt, created_at, updated_at
+			server_iv, server_salt, client_iv, client_salt, creator_ip, created_at, updated_at
 		FROM keys WHERE id = ? AND user_id = ?`, id, userID)
 	var k Key
+	var creatorIP sql.NullString
 	if err := row.Scan(
 		&k.ID, &k.UserID, &k.Name, &k.NameNormalized, &k.ServerCiphertext,
-		&k.ServerIV, &k.ServerSalt, &k.ClientIV, &k.ClientSalt, &k.CreatedAt, &k.UpdatedAt,
+		&k.ServerIV, &k.ServerSalt, &k.ClientIV, &k.ClientSalt, &creatorIP, &k.CreatedAt, &k.UpdatedAt,
 	); err != nil {
 		return nil, err
+	}
+	if creatorIP.Valid {
+		k.CreatorIP = creatorIP.String
 	}
 	return &k, nil
 }
