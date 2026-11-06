@@ -101,8 +101,8 @@ func (s *Server) SetupHandler() http.Handler {
 	// 6. Backup Trigger
 	mux.Handle("POST /api/v1/admin/backup", authMiddleware(http.HandlerFunc(s.handleRunBackup)))
 
-	// Chain middlewares: SecurityHeaders -> SealGuard -> mux
-	handler := middleware.SecurityHeaders(middleware.SealGuard(s.sealMgr)(mux))
+	// Chain middlewares: ProxyHeaders -> SecurityHeaders -> SealGuard -> mux
+	handler := middleware.ProxyHeaders(s.cfg.RPID)(middleware.SecurityHeaders(middleware.SealGuard(s.sealMgr)(mux)))
 	return handler
 }
 
@@ -115,7 +115,7 @@ func (s *Server) userKeyFunc(r *http.Request) string {
 }
 
 func isSecureRequest(r *http.Request) bool {
-	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	return middleware.IsSecureRequest(r)
 }
 
 // Write JSON helper

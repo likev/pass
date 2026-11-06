@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,37 +29,14 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Dispatch CLI subcommands if specified
-	if len(os.Args) > 1 {
-		cmd := strings.ToLower(os.Args[1])
-		switch cmd {
-		case "init":
-			handleCLIInit(cfg)
-			return
-		case "unseal":
-			handleCLIUnseal(cfg)
-			return
-		case "rotate-passphrase":
-			handleCLIRotate(cfg)
-			return
-		case "backup":
-			handleCLIBackup(cfg)
-			return
-		case "help", "-h", "--help":
-			printUsage()
-			return
-		case "run", "serve", "start":
-			// Proceed to start server
-		default:
-			if strings.HasPrefix(cmd, "-") {
-				// Flag or unknown option
-				printUsage()
-				return
-			}
-			fmt.Printf("Unknown command: %s\n\n", cmd)
-			printUsage()
-			os.Exit(1)
-		}
+	start, err := parseServerFlags(cfg, os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		printUsage()
+		os.Exit(1)
+	}
+	if !start {
+		return
 	}
 
 	log.Println("[Main] Initializing Web Password & Key Manager...")
@@ -135,7 +113,7 @@ func main() {
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS13,
 		}
-	} else if cfg.AutoTLS {
+	} else if cfg.TLSEnabled || cfg.AutoTLS {
 		cert, err := GenerateSelfSignedCert()
 		if err != nil {
 			log.Fatalf("[Main] Failed to generate auto-TLS cert: %v", err)
@@ -365,17 +343,106 @@ func handleCLIBackup(cfg *config.Config) {
 	fmt.Printf("Success! Encrypted backup written to: %s\n", path)
 }
 
+// parseServerFlags parses CLI arguments/flags and updates cfg.
+// Returns (shouldStartServer, error).
+func parseServerFlags(cfg *config.Config, args []string) (bool, error) {
+	if len(args) > 0 {
+		cmd := strings.ToLower(args[0])
+		switch cmd {
+		case "init":
+			handleCLIInit(cfg)
+			return false, nil
+		case "unseal":
+			handleCLIUnseal(cfg)
+			return false, nil
+		case "rotate-passphrase":
+			handleCLIRotate(cfg)
+			return false, nil
+		case "backup":
+			handleCLIBackup(cfg)
+			return false, nil
+		case "help", "-h", "--help":
+			printUsage()
+			return false, nil
+		case "run", "serve", "start":
+			args = args[1:]
+		default:
+			if !strings.HasPrefix(cmd, "-") {
+				return false, fmt.Errorf("unknown command: %s", cmd)
+			}
+		}
+	}
+
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	fs.Usage = printUsage
+	tlsFlag := fs.Bool("tls", false, "Enable direct TLS (generates self-signed cert if cert/key not provided)")
+	tlsCertFlag := fs.String("tls-cert", "", "Path to TLS certificate file")
+	tlsKeyFlag := fs.String("tls-key", "", "Path to TLS private key file")
+	portFlag := fs.String("port", "", "Server listen port (default: 8082)")
+	hostFlag := fs.String("host", "", "Server listen host (default: localhost)")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	for _, extra := range fs.Args() {
+		switch strings.ToLower(extra) {
+		case "run", "serve", "start":
+			// Allow trailing run/serve/start commands
+		default:
+			return false, fmt.Errorf("unknown command or argument: %s", extra)
+		}
+	}
+
+	if *tlsFlag {
+		cfg.TLSEnabled = true
+		cfg.AutoTLS = true
+	}
+	if *tlsCertFlag != "" {
+		cfg.TLSCertPath = *tlsCertFlag
+	}
+	if *tlsKeyFlag != "" {
+		cfg.TLSKeyPath = *tlsKeyFlag
+	}
+	if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+		cfg.TLSEnabled = true
+	}
+	if *portFlag != "" {
+		cfg.Port = *portFlag
+	}
+	if *hostFlag != "" {
+		cfg.Host = *hostFlag
+	}
+
+	// Validate TLS certificate and key consistency
+	if (cfg.TLSCertPath != "" && cfg.TLSKeyPath == "") || (cfg.TLSCertPath == "" && cfg.TLSKeyPath != "") {
+		return false, fmt.Errorf("invalid TLS configuration: both TLS certificate and private key must be provided")
+	}
+
+	return true, nil
+}
+
 func printUsage() {
 	fmt.Println(`Web Password & Key Manager
 
 Usage:
-  keymanager [command]
+  keymanager [command] [flags]
 
 Commands:
-  run, serve         Start the HTTPS server (default)
+  run, serve         Start the HTTP/HTTPS server (default: http://localhost:8082)
   init               Initialize Server Master Key with an Admin Startup Passphrase
   unseal             Prompt for Admin Startup Passphrase and verify unseal
   rotate-passphrase  Rotate the Admin Startup Passphrase on server_master.key.enc
   backup             Run immediate SQLite snapshot, integrity check, and encryption
-  help, -h, --help   Show this help message`)
+  help, -h, --help   Show this help message
+
+Flags:
+  --tls              Enable direct TLS (auto-generates self-signed cert if none provided)
+  --tls-cert <path>  Path to TLS certificate file (or TLS_CERT env var)
+  --tls-key <path>   Path to TLS private key file (or TLS_KEY env var)
+  --port <port>      Listen port (default: 8082, or PORT env var)
+  --host <host>      Listen host (default: localhost, or HOST env var)`)
 }

@@ -51,6 +51,18 @@ func (rl *RateLimiter) cleanup() {
 }
 
 func GetIP(r *http.Request) string {
+	if cfIP := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cfIP != "" {
+		if host, _, err := net.SplitHostPort(cfIP); err == nil {
+			return host
+		}
+		return strings.Trim(cfIP, "[]")
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		if host, _, err := net.SplitHostPort(realIP); err == nil {
+			return host
+		}
+		return strings.Trim(realIP, "[]")
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		for _, part := range parts {

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"passmanager/internal/db"
 )
@@ -163,10 +162,7 @@ func (dm *DeviceManager) ApproveRequest(
 		return err
 	}
 
-	options, sessionData, err := dm.authSvc.webAuthn.BeginRegistration(
-		waUser,
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
-	)
+	options, sessionData, err := dm.authSvc.BeginRegistrationForUser(ctx, waUser)
 	if err != nil {
 		return fmt.Errorf("failed to prepare registration options for new device: %w", err)
 	}
@@ -291,7 +287,7 @@ func (dm *DeviceManager) CompleteRequest(
 		return nil, fmt.Errorf("failed to parse attestation: %w", err)
 	}
 
-	cred, err := dm.authSvc.webAuthn.CreateCredential(waUser, *regSession.sessionData, parsedResponse)
+	cred, err := dm.authSvc.CreateCredential(ctx, waUser, *regSession.sessionData, parsedResponse)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify new device credential: %w", err)
 	}

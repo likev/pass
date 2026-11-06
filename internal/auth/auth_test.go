@@ -201,3 +201,105 @@ func TestDeviceVerificationStateMachine(t *testing.T) {
 		t.Fatalf("Expected status expired, got %s", statusRespAfterExpiry.Status)
 	}
 }
+
+func TestDynamicRPOriginsValidationAndBounds(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "auth-origin-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "auth_orig.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{
+		RPID:          "localhost",
+		RPDisplayName: "Test RP",
+		RPOrigins:     []string{"http://localhost:8082"},
+	}
+
+	sm := NewSessionManager()
+	authSvc, err := NewAuthService(database, cfg, sm)
+	if err != nil {
+		t.Fatalf("NewAuthService failed: %v", err)
+	}
+
+	// 1. Invalid origins should be rejected
+	authSvc.ensureOrigin("")
+	authSvc.ensureOrigin("ftp://example.com")
+	authSvc.ensureOrigin("javascript:alert(1)")
+	authSvc.ensureOrigin("not-a-url")
+
+	authSvc.mu.Lock()
+	countBefore := len(authSvc.webAuthn.Config.RPOrigins)
+	authSvc.mu.Unlock()
+
+	if countBefore != 1 {
+		t.Fatalf("expected invalid origins to be ignored, count is %d", countBefore)
+	}
+
+	// 2. Valid origins should be added
+	authSvc.ensureOrigin("https://vault.company.local")
+	authSvc.mu.Lock()
+	countAfter := len(authSvc.webAuthn.Config.RPOrigins)
+	authSvc.mu.Unlock()
+
+	if countAfter != 2 {
+		t.Fatalf("expected valid origin to be added, got %d", countAfter)
+	}
+
+	// 3. Duplicate origin should not increase slice size
+	authSvc.ensureOrigin("https://vault.company.local")
+	authSvc.mu.Lock()
+	countDup := len(authSvc.webAuthn.Config.RPOrigins)
+	authSvc.mu.Unlock()
+
+	if countDup != 2 {
+		t.Fatalf("expected duplicate origin not to be added, got %d", countDup)
+	}
+}
+
+func TestDynamicRPOriginsThreadSafety(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "auth-orig-race-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "auth_race.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open test db: %v", err)
+	}
+	defer database.Close()
+
+	cfg := &config.Config{
+		RPID:          "localhost",
+		RPDisplayName: "Test RP",
+		RPOrigins:     []string{"http://localhost:8082"},
+	}
+
+	sm := NewSessionManager()
+	authSvc, err := NewAuthService(database, cfg, sm)
+	if err != nil {
+		t.Fatalf("NewAuthService failed: %v", err)
+	}
+
+	done := make(chan bool)
+	for i := 0; i < 20; i++ {
+		go func(idx int) {
+			for j := 0; j < 50; j++ {
+				authSvc.ensureOrigin("https://origin.test.local")
+			}
+			done <- true
+		}(i)
+	}
+
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}

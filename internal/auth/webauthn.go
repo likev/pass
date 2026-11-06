@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +18,19 @@ import (
 	"passmanager/internal/config"
 	"passmanager/internal/db"
 )
+
+type WebAuthnContextKey string
+
+const (
+	OriginContextKey WebAuthnContextKey = "webauthn_origin"
+	RPIDContextKey   WebAuthnContextKey = "webauthn_rpid"
+)
+
+func WithWebAuthnContext(ctx context.Context, origin, rpID string) context.Context {
+	ctx = context.WithValue(ctx, OriginContextKey, origin)
+	ctx = context.WithValue(ctx, RPIDContextKey, rpID)
+	return ctx
+}
 
 var (
 	ErrUserNotFound       = errors.New("user not found")
@@ -27,6 +42,7 @@ var (
 
 type AuthService struct {
 	db             *db.DB
+	cfg            *config.Config
 	webAuthn       *webauthn.WebAuthn
 	sessions       *SessionManager
 	mu             sync.RWMutex
@@ -122,6 +138,7 @@ func NewAuthService(database *db.DB, cfg *config.Config, sm *SessionManager) (*A
 
 	as := &AuthService{
 		db:             database,
+		cfg:            cfg,
 		webAuthn:       wa,
 		sessions:       sm,
 		regSessions:    make(map[string]*regSessionEntry),
@@ -158,6 +175,67 @@ func (as *AuthService) cleanExpiredSessions() {
 			delete(as.stepUpSessions, k)
 		}
 	}
+}
+
+const maxRPOrigins = 128
+
+func (as *AuthService) ensureOriginLocked(origin string) {
+	if origin == "" {
+		return
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return
+	}
+	for _, o := range as.webAuthn.Config.RPOrigins {
+		if strings.EqualFold(o, origin) {
+			return
+		}
+	}
+	if len(as.webAuthn.Config.RPOrigins) < maxRPOrigins {
+		as.webAuthn.Config.RPOrigins = append(as.webAuthn.Config.RPOrigins, origin)
+	}
+}
+
+func (as *AuthService) ensureOrigin(origin string) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.ensureOriginLocked(origin)
+}
+
+func (as *AuthService) getRPIDAndOriginLocked(ctx context.Context) (string, string) {
+	rpID := ""
+	if as.cfg != nil {
+		rpID = as.cfg.RPID
+	}
+	if customRPID, ok := ctx.Value(RPIDContextKey).(string); ok && customRPID != "" {
+		rpID = customRPID
+	}
+	origin := ""
+	if customOrigin, ok := ctx.Value(OriginContextKey).(string); ok && customOrigin != "" {
+		origin = customOrigin
+		as.ensureOriginLocked(origin)
+	}
+	return rpID, origin
+}
+
+func (as *AuthService) BeginRegistrationForUser(ctx context.Context, user *WebAuthnUser) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+
+	rpID, origin := as.getRPIDAndOriginLocked(ctx)
+
+	regOpts := []webauthn.RegistrationOption{
+		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
+	}
+	if rpID != "" {
+		regOpts = append(regOpts, webauthn.WithRegistrationRelyingPartyID(rpID))
+	}
+	if origin != "" {
+		regOpts = append(regOpts, webauthn.WithRegistrationOrigin(origin))
+	}
+
+	return as.webAuthn.BeginRegistration(user, regOpts...)
 }
 
 func (as *AuthService) buildWebAuthnUser(ctx context.Context, dbUser *db.User) (*WebAuthnUser, error) {
@@ -198,10 +276,7 @@ func (as *AuthService) BeginRegistration(ctx context.Context, username, displayN
 		displayName: displayName,
 	}
 
-	options, sessionData, err := as.webAuthn.BeginRegistration(
-		tempUser,
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
-	)
+	options, sessionData, err := as.BeginRegistrationForUser(ctx, tempUser)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("failed to begin registration: %w", err)
 	}
@@ -231,6 +306,26 @@ func (as *AuthService) BeginRegistration(ctx context.Context, username, displayN
 	return options, regID, base64.RawURLEncoding.EncodeToString(prfSalt), nil
 }
 
+// CreateCredential completes WebAuthn credential creation under synchronization
+func (as *AuthService) CreateCredential(ctx context.Context, user *WebAuthnUser, sessionData webauthn.SessionData, parsedResponse *protocol.ParsedCredentialCreationData) (*webauthn.Credential, error) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if customOrigin, ok := ctx.Value(OriginContextKey).(string); ok && customOrigin != "" {
+		as.ensureOriginLocked(customOrigin)
+	}
+	return as.webAuthn.CreateCredential(user, sessionData, parsedResponse)
+}
+
+// ValidateLogin validates WebAuthn assertion under synchronization
+func (as *AuthService) ValidateLogin(ctx context.Context, user *WebAuthnUser, sessionData webauthn.SessionData, parsedResponse *protocol.ParsedCredentialAssertionData) (*webauthn.Credential, error) {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if customOrigin, ok := ctx.Value(OriginContextKey).(string); ok && customOrigin != "" {
+		as.ensureOriginLocked(customOrigin)
+	}
+	return as.webAuthn.ValidateLogin(user, sessionData, parsedResponse)
+}
+
 // FinishRegistration completes Passkey creation and stores wrapped_mek
 func (as *AuthService) FinishRegistration(ctx context.Context, regID string, attestationBytes []byte, wrappedMEK, wrappedMEKIV []byte, deviceName string, ipAddr string) (*SessionInfo, *db.User, error) {
 	as.mu.Lock()
@@ -255,7 +350,7 @@ func (as *AuthService) FinishRegistration(ctx context.Context, regID string, att
 		return nil, nil, fmt.Errorf("failed to parse attestation: %w", err)
 	}
 
-	cred, err := as.webAuthn.CreateCredential(tempUser, *entry.sessionData, parsedResponse)
+	cred, err := as.CreateCredential(ctx, tempUser, *entry.sessionData, parsedResponse)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create credential: %w", err)
 	}
@@ -326,23 +421,37 @@ func (as *AuthService) BeginLogin(ctx context.Context, username string) (*protoc
 		}
 	}
 
-	var options *protocol.CredentialAssertion
-	var sessionData *webauthn.SessionData
-	var err error
-
-	if user != nil {
-		options, sessionData, err = as.webAuthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
-	} else {
-		// Discoverable credential login
-		options, sessionData, err = as.webAuthn.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
-	}
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("failed to begin login: %w", err)
-	}
-
 	loginID, err := generateRandomToken(32)
 	if err != nil {
 		return nil, "", nil, err
+	}
+
+	as.mu.Lock()
+	defer as.mu.Unlock()
+
+	rpID, origin := as.getRPIDAndOriginLocked(ctx)
+
+	loginOpts := []webauthn.LoginOption{
+		webauthn.WithUserVerification(protocol.VerificationRequired),
+	}
+	if rpID != "" {
+		loginOpts = append(loginOpts, webauthn.WithLoginRelyingPartyID(rpID))
+	}
+	if origin != "" {
+		loginOpts = append(loginOpts, webauthn.WithLoginOrigin(origin))
+	}
+
+	var options *protocol.CredentialAssertion
+	var sessionData *webauthn.SessionData
+
+	if user != nil {
+		options, sessionData, err = as.webAuthn.BeginLogin(user, loginOpts...)
+	} else {
+		// Discoverable credential login
+		options, sessionData, err = as.webAuthn.BeginDiscoverableLogin(loginOpts...)
+	}
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("failed to begin login: %w", err)
 	}
 
 	userID := ""
@@ -350,13 +459,11 @@ func (as *AuthService) BeginLogin(ctx context.Context, username string) (*protoc
 		userID = string(user.id)
 	}
 
-	as.mu.Lock()
 	as.loginSessions[loginID] = &loginSessionEntry{
 		userID:      userID,
 		sessionData: sessionData,
 		expiresAt:   time.Now().Add(5 * time.Minute),
 	}
-	as.mu.Unlock()
 
 	return options, loginID, prfSalts, nil
 }
@@ -398,7 +505,7 @@ func (as *AuthService) FinishLogin(ctx context.Context, loginID string, assertio
 		return nil, nil, err
 	}
 
-	verifiedCred, err := as.webAuthn.ValidateLogin(waUser, *entry.sessionData, parsedResponse)
+	verifiedCred, err := as.ValidateLogin(ctx, waUser, *entry.sessionData, parsedResponse)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to validate assertion: %w", err)
 	}
@@ -425,11 +532,6 @@ func (as *AuthService) BeginStepUp(ctx context.Context, userID string, credID []
 		return nil, "", nil, err
 	}
 
-	options, sessionData, err := as.webAuthn.BeginLogin(waUser, webauthn.WithUserVerification(protocol.VerificationRequired))
-	if err != nil {
-		return nil, "", nil, fmt.Errorf("failed to begin step-up: %w", err)
-	}
-
 	stepUpID, err := generateRandomToken(32)
 	if err != nil {
 		return nil, "", nil, err
@@ -445,13 +547,31 @@ func (as *AuthService) BeginStepUp(ctx context.Context, userID string, credID []
 	}
 
 	as.mu.Lock()
+	defer as.mu.Unlock()
+
+	rpID, origin := as.getRPIDAndOriginLocked(ctx)
+
+	stepUpOpts := []webauthn.LoginOption{
+		webauthn.WithUserVerification(protocol.VerificationRequired),
+	}
+	if rpID != "" {
+		stepUpOpts = append(stepUpOpts, webauthn.WithLoginRelyingPartyID(rpID))
+	}
+	if origin != "" {
+		stepUpOpts = append(stepUpOpts, webauthn.WithLoginOrigin(origin))
+	}
+
+	options, sessionData, err := as.webAuthn.BeginLogin(waUser, stepUpOpts...)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("failed to begin step-up: %w", err)
+	}
+
 	as.stepUpSessions[stepUpID] = &stepUpSessionEntry{
 		userID:       userID,
 		credentialID: credID,
 		sessionData:  sessionData,
 		expiresAt:    time.Now().Add(5 * time.Minute),
 	}
-	as.mu.Unlock()
 
 	return options, stepUpID, cred.PRFSalt, nil
 }
@@ -522,7 +642,7 @@ func (as *AuthService) VerifyStepUp(ctx context.Context, stepUpID string, assert
 		return nil, err
 	}
 
-	verifiedCred, err := as.webAuthn.ValidateLogin(waUser, *entry.sessionData, parsedResponse)
+	verifiedCred, err := as.ValidateLogin(ctx, waUser, *entry.sessionData, parsedResponse)
 	if err != nil {
 		return nil, fmt.Errorf("step-up assertion verification failed: %w", err)
 	}

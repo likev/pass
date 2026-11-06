@@ -35,7 +35,7 @@ func setupTestServer(t *testing.T) (*Server, http.Handler, *db.DB, *crypto.SealM
 	}
 
 	cfg := &config.Config{
-		Port:                "8443",
+		Port:                "8082",
 		Host:                "127.0.0.1",
 		DBPath:              dbPath,
 		SealedSMKPath:       filepath.Join(tempDir, "server_master.key.enc"),
@@ -43,7 +43,7 @@ func setupTestServer(t *testing.T) (*Server, http.Handler, *db.DB, *crypto.SealM
 		BackupRetentionDays: 30,
 		RPID:                "localhost",
 		RPDisplayName:       "Test RP",
-		RPOrigins:           []string{"http://localhost:8080", "https://localhost:8443"},
+		RPOrigins:           []string{"http://localhost:8080", "https://localhost:8443", "http://localhost:8082", "https://localhost:8082"},
 	}
 
 	sealMgr := crypto.NewSealManager(cfg.SealedSMKPath)

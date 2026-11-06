@@ -45,7 +45,7 @@ This document outlines the architecture and implementation plan for a zero-knowl
 | **WebAuthn / Passkey** | `github.com/go-webauthn/webauthn` | Standards-compliant FIDO2 / WebAuthn Relying Party implementation for Go. |
 | **Database** | SQLite 3 (`modernc.org/sqlite` or `mattn/go-sqlite3`) | Embedded relational DB configured with `WAL` mode, foreign keys, and online `VACUUM INTO` backup support. |
 | **Frontend** | Vanilla ES2022+ JS, HTML5, CSS3 (served via Go `embed.FS`) | Zero third-party JS supply-chain risk; direct access to `navigator.credentials` (WebAuthn + PRF), `window.crypto.subtle` (WebCrypto), and `navigator.clipboard`. |
-| **Transport Security** | HTTPS / TLS 1.3 | Mandatory for WebAuthn Passkeys, PRF extension, WebCrypto API, and Clipboard API. |
+| **Transport Security** | HTTP (default `localhost:8082`) behind Reverse Proxy (Caddy / Cloudflare with TLS 1.3), or direct TLS via `--tls` | Backend serves plain HTTP on `localhost:8082` by default for reverse proxy deployment (Caddy / Cloudflare terminating TLS), with dynamic `X-Forwarded-Proto`, `X-Forwarded-Host`, `Host` handling for WebAuthn RP/Origin and session cookies, and direct TLS support via `--tls` or `TLS_CERT`/`TLS_KEY`. |
 
 ### High-Level Architecture Diagram
 
@@ -595,13 +595,39 @@ The Go backend includes an internal backup manager (`internal/backup/scheduler.g
 
 ---
 
+### 5.7 Reverse Proxy Deployment (Caddy & Cloudflare)
+
+The Key Manager server listens by default on plain HTTP on `localhost:8082` (`http://localhost:8082`), designed for deployment behind a TLS-terminating reverse proxy (such as Caddy or Cloudflare).
+
+#### Caddy Configuration
+In standard deployments, Caddy automatically provisions TLS certificates and proxies traffic to the backend:
+```caddyfile
+vault.yourdomain.com {
+    reverse_proxy localhost:8082
+}
+```
+Caddy automatically sets `X-Forwarded-Proto: https`, `X-Forwarded-Host: vault.yourdomain.com`, and `X-Forwarded-For: <client-ip>`.
+
+#### Cloudflare Configuration
+When deployed behind Cloudflare (with Cloudflare proxy enabled / orange cloud):
+- **SSL/TLS encryption mode**: Set to **Full (strict)** if backend has direct TLS enabled, or **Flexible / Full** depending on internal tunnel setup (e.g., Cloudflare Tunnel / `cloudflared` pointing to `http://localhost:8082`).
+- **Headers handled**: Key Manager automatically respects `CF-Connecting-IP`, `Cf-Visitor: {"scheme":"https"}`, `X-Forwarded-Proto`, and `Host`.
+
+#### Dynamic Origin & Relying Party ID Resolution
+- **WebAuthn Ceremonies**: Key Manager extracts the external scheme (`https` or `http`) and host (from `X-Forwarded-Host` or `Host`), dynamically binding WebAuthn registration, login, and step-up challenges to the correct public origin and RP ID.
+- **Session Cookies**: The session cookie (`km_session`) dynamically sets `Secure=true` when incoming traffic is secure (direct TLS, `X-Forwarded-Proto: https`, `Cf-Visitor: {"scheme":"https"}`), and omits `Secure` during local HTTP development on `http://localhost:8082`.
+- **HSTS**: `Strict-Transport-Security` is emitted only when external traffic is HTTPS, adhering to RFC 6797.
+- **Direct TLS**: When running standalone without a reverse proxy, direct TLS can be activated via `--tls` (auto-generated self-signed cert) or `--tls-cert <path> --tls-key <path>` (or environment variables `TLS_CERT` and `TLS_KEY`).
+
+---
+
 ## 6. REST API Specification
 
 All state-mutating and key-retrieval endpoints require:
-- `HTTPS` (TLS 1.3)
-- Authenticated session cookie (`__Host-km_session`, `HttpOnly`, `Secure`, `SameSite=Strict`)
+- `HTTPS` externally (terminated by Caddy / Cloudflare or enabled via `--tls`), or `HTTP` on `localhost:8082` for local development
+- Authenticated session cookie (`km_session`, `HttpOnly`, `SameSite=Strict`, `Secure` dynamically toggled based on HTTPS / `X-Forwarded-Proto`)
 - CSRF token header (`X-CSRF-Token`)
-- Response headers: `Cache-Control: no-store, no-cache, must-revalidate`, `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'`
+- Response headers: `Cache-Control: no-store, no-cache, must-revalidate`, `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'`, `Strict-Transport-Security` (when HTTPS)
 
 | Method | Path | Description | Rate Limit |
 | :--- | :--- | :--- | :--- |
@@ -655,9 +681,10 @@ All state-mutating and key-retrieval endpoints require:
 │   ├── backup/
 │   │   └── scheduler.go             # Daily SQLite VACUUM INTO + integrity check + encryption + retention
 │   └── middleware/
+│       ├── proxy.go                 # Reverse proxy headers (X-Forwarded-Proto, X-Forwarded-Host, Host), WebAuthn RP/Origin context
 │       ├── seal_guard.go            # Rejects API requests with 503 while server SMK is sealed
-│       ├── security_headers.go      # CSP, HSTS, Cache-Control: no-store
-│       └── ratelimit.go             # Per-user / Per-IP token bucket rate limiter
+│       ├── security_headers.go      # CSP, HSTS (HTTPS only), Cache-Control: no-store
+│       └── ratelimit.go             # Per-user / Per-IP token bucket rate limiter (supports CF-Connecting-IP, X-Real-IP, XFF)
 ├── web/
 │   ├── embed.go                     # Go embed.FS declaration
 │   └── static/
