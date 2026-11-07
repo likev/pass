@@ -247,11 +247,11 @@
           <p class="text-muted small mode-hint" data-i18n="modeTotpHint">Scan a 2FA QR code with your camera, upload/paste a QR screenshot, or enter a Base32 setup key. The TOTP seed is E2EE encrypted and generates 6-digit codes on demand.</p>
 
           <div class="totp-scan-actions">
-            <button id="btn-totp-camera" type="button" class="btn btn-secondary btn-sm">
+            <button id="btn-totp-camera" type="button" class="btn btn-outline btn-sm totp-action-btn">
               <span aria-hidden="true">📷</span>
               <span id="btn-totp-camera-label" data-i18n="btnTotpScanCamera">Scan QR with Camera</span>
             </button>
-            <button id="btn-totp-upload" type="button" class="btn btn-secondary btn-sm">
+            <button id="btn-totp-upload" type="button" class="btn btn-outline btn-sm totp-action-btn">
               <span aria-hidden="true">🖼️</span>
               <span data-i18n="btnTotpUploadQr">Upload QR Image</span>
             </button>
@@ -260,6 +260,13 @@
 
           <div id="totp-camera-box" class="totp-camera-box" style="display: none;">
             <video id="totp-qr-video" class="totp-qr-video" muted playsinline></video>
+            <div class="totp-scan-reticle" aria-hidden="true">
+              <span class="reticle-corner tl"></span>
+              <span class="reticle-corner tr"></span>
+              <span class="reticle-corner bl"></span>
+              <span class="reticle-corner br"></span>
+              <span class="reticle-scanline"></span>
+            </div>
             <div class="totp-camera-overlay" data-i18n="totpCameraAimHint">Point camera at 2FA QR code...</div>
           </div>
 
@@ -267,7 +274,7 @@
             <span id="totp-status-badge" class="badge badge-neutral" data-i18n="totpStatusEmpty">No TOTP seed captured yet.</span>
           </div>
 
-          <div class="form-group" style="margin-top: 0.65rem;">
+          <div class="form-group totp-manual-group">
             <label for="totp-seed-input" data-i18n="totpManualLabel">Or Enter Setup Key (Base32) / otpauth:// URI</label>
             <input type="password" id="totp-seed-input" class="form-control masked-input" placeholder="JBSWY3DPEHPK3PXP or otpauth://totp/..." data-i18n-placeholder="totpManualPlaceholder" autocomplete="off" spellcheck="false">
           </div>

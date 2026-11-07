@@ -4,3 +4,4 @@
 *.enc
 backups/
 /etc/keymanager/
+.agents/

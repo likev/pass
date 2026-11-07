@@ -820,20 +820,27 @@ function updatePasteBadgeCopy() {
 
 function updateTotpBadgeCopy() {
   if (!els.totpStatusBadge) return;
+  const statusBox = els.totpStatusBadge.parentElement;
   if (state.pendingTotpBytes && state.pendingTotpBytes.length > 0 && state.pendingTotpMeta) {
     els.totpStatusBadge.textContent = I18n.t("totpStatusCaptured", {
       digits: state.pendingTotpMeta.digits,
       period: state.pendingTotpMeta.period,
     });
     els.totpStatusBadge.className = "badge badge-success";
+    if (statusBox) statusBox.classList.add("is-captured");
   } else {
     els.totpStatusBadge.textContent = I18n.t("totpStatusEmpty");
     els.totpStatusBadge.className = "badge badge-neutral";
+    if (statusBox) statusBox.classList.remove("is-captured");
   }
+  const active = TOTPUtils.isCameraActive();
   if (els.btnTotpCameraLabel) {
-    els.btnTotpCameraLabel.textContent = TOTPUtils.isCameraActive()
+    els.btnTotpCameraLabel.textContent = active
       ? I18n.t("btnTotpStopCamera")
       : I18n.t("btnTotpScanCamera");
+  }
+  if (els.btnTotpCamera) {
+    els.btnTotpCamera.classList.toggle("is-active", active);
   }
 }
 
@@ -842,6 +849,9 @@ function stopTotpCameraUI() {
   if (els.totpCameraBox) els.totpCameraBox.style.display = "none";
   if (els.btnTotpCameraLabel) {
     els.btnTotpCameraLabel.textContent = I18n.t("btnTotpScanCamera");
+  }
+  if (els.btnTotpCamera) {
+    els.btnTotpCamera.classList.remove("is-active");
   }
 }
 
@@ -923,6 +933,7 @@ if (els.btnTotpCamera) {
     }
     try {
       els.totpCameraBox.style.display = "block";
+      els.btnTotpCamera.classList.add("is-active");
       els.btnTotpCameraLabel.textContent = I18n.t("btnTotpStopCamera");
       await TOTPUtils.startCameraScanner(
         els.totpQrVideo,
